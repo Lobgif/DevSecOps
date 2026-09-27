@@ -17,7 +17,8 @@ Les décisions d'architecture de fond restent dans le `README.md` ; ici on note 
 4. [Base de départ de l'application](#4-base-de-départ-de-lapplication)
 5. [Hébergement Git — GitHub & GitLab](#5-hébergement-git--github--gitlab)
 6. [Structure du backend — architecture en couches](#6-structure-du-backend--architecture-en-couches)
-7. [Ressources](#ressources)
+7. [Emplacement des fichiers CI — GitHub vs GitLab](#7-emplacement-des-fichiers-ci--github-vs-gitlab)
+8. [Ressources](#ressources)
 
 ---
 
@@ -294,6 +295,51 @@ git fetch --prune gitlab
 git branch -vv
 ```
 
+**Ce qui s'est réellement passé :** les suppressions ont été refusées (`refusing to delete the current
+branch` sur GitHub, `The default branch of a project cannot be deleted` sur GitLab). Plutôt que de mettre
+`feature/cicd` par défaut, on a créé **`main`** et on en a fait la branche par défaut (voir 5.1 quinquies).
+
+### 5.1 quinquies Branche `main` par défaut
+
+**Date :** 2026-09-27
+
+**Leçon :** le réglage « nom de branche par défaut = `main` » des plateformes ne **crée** aucune branche ;
+il ne sert que si la plateforme fait elle-même le premier commit. Sur un dépôt créé **vide**, la
+**première branche poussée devient la branche par défaut** (ici `feature/github`, par accident).
+Un dépôt a toujours une branche par défaut, et elle ne peut pas être supprimée.
+
+```bash
+# créer main sur les deux dépôts à partir de la branche locale (pas besoin de main en local)
+git push github feature/cicd:main
+git push gitlab feature/cicd:main
+
+# en faire la branche par défaut
+gh repo edit Lobgif/DevSecOps --default-branch main
+glab api -X PUT "projects/personnel4344847%2FDevSecOps" -f default_branch=main
+
+# supprimer l'ancienne (GitLab : retirer la protection d'abord)
+glab api -X DELETE "projects/personnel4344847%2FDevSecOps/protected_branches/feature%2Fgithub"
+git push github --delete feature/github
+git push gitlab --delete feature/github
+
+# GitLab : protéger main
+glab api -X POST "projects/personnel4344847%2FDevSecOps/protected_branches" -f name=main
+```
+
+`feature/cicd:main` = « pousse ma branche locale `feature/cicd` vers la branche distante `main` ».
+
+**État vérifié (2026-09-27) :**
+
+| | Branche par défaut | Branches | Protection |
+|---|---|---|---|
+| GitHub | `main` | `main`, `feature/cicd` (toutes deux sur `da20132`) | aucune |
+| GitLab | `main` | `main`, `feature/cicd` (toutes deux sur `da20132`) | `main` : push et merge réservés aux Maintainers (niveau 40), force push interdit |
+
+- Branche de travail locale : `feature/cicd`, qui suit `github/feature/cicd`.
+- `main` et `feature/cicd` pointent sur le même commit → la première PR/MR ne contiendra que les
+  commits faits **après** ce point.
+- À faire (optionnel) : protéger `main` sur GitHub aussi (règles de branche / rulesets).
+
 ### 5.1 ter Fins de ligne — `.gitattributes`
 
 **Date :** 2026-09-27
@@ -444,6 +490,32 @@ ignorés, `uv.lock` ne l'est **pas** (il doit être commité).
 
 ---
 
+## 7. Emplacement des fichiers CI — GitHub vs GitLab
+
+**Date :** 2026-09-27 (connaissance à retenir avant la phase 3)
+
+**Question :** peut-on ranger la config CI dans un sous-dossier (ex. `infrastructures/`) ?
+
+| | GitHub Actions | GitLab CI |
+|---|---|---|
+| Fichier(s) | `.github/workflows/*.yml` | `.gitlab-ci.yml` |
+| Emplacement | **Imposé** : `.github/` à la **racine** du dépôt. Un `.github/` dans un sous-dossier est ignoré. | Racine **par défaut**, mais **configurable** : réglage `ci_config_path` du projet (ex. `infrastructures/ci/.gitlab-ci.yml`). |
+| Découper en plusieurs fichiers | Workflows réutilisables : eux aussi **obligatoirement** dans `.github/workflows/`. | `include:` → le fichier principal importe d'autres fichiers YAML placés **où on veut**. |
+| Ce qui peut vivre ailleurs | Les **actions composites** (`action.yml`), appelées par `uses: ./chemin/vers/action` ; les scripts appelés par les étapes. | Tout : fichiers inclus, scripts. |
+
+Autres fichiers GitHub à emplacement imposé ou limité :
+- `dependabot.yml` : uniquement `.github/dependabot.yml`.
+- `CODEOWNERS` : `.github/`, racine ou `docs/`.
+
+Changer le chemin du fichier CI GitLab par l'API :
+`glab api -X PUT "projects/personnel4344847%2FDevSecOps" -f ci_config_path=<chemin>`
+(valeur actuelle : vide = `.gitlab-ci.yml` à la racine).
+
+**Conséquence pour le projet :** `.github/` restera à la racine quoi qu'on décide. Pour GitLab, le choix
+entre racine et `infrastructures/` est libre (à trancher en phase 3).
+
+---
+
 <!-- Ajouter les nouvelles décisions au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -492,10 +564,24 @@ Sources officielles uniquement. Vérifiées le 2026-09-27.
 - `glab api` — https://docs.gitlab.com/cli/api/
 - `glab repo create` — https://docs.gitlab.com/cli/repo/create/
 
+### CI — GitHub Actions & GitLab CI
+- Syntaxe des workflows GitHub Actions (`.github/workflows`) — https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+- Workflows réutilisables — https://docs.github.com/en/actions/concepts/workflows-and-actions/reusable-workflows
+- Actions composites — https://docs.github.com/en/actions/tutorials/create-actions/create-a-composite-action
+- Dependabot (`.github/dependabot.yml`) — https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+- CODEOWNERS (emplacements possibles) — https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+- GitLab : réglages des pipelines (chemin personnalisé du fichier CI) — https://docs.gitlab.com/ci/pipelines/settings/
+- GitLab : `include` — https://docs.gitlab.com/ci/yaml/includes/
+
 ### Git
 - `git remote` — https://git-scm.com/docs/git-remote
 - `git init` (option `--initial-branch`) — https://git-scm.com/docs/git-init
 - `git switch` — https://git-scm.com/docs/git-switch
+- `git branch` (`-m` renommer, `-vv` suivi) — https://git-scm.com/docs/git-branch
+- `git fetch` (`--prune`) — https://git-scm.com/docs/git-fetch
+- GitLab : API Protected branches — https://docs.gitlab.com/api/protected_branches/
+- GitLab : branches protégées (concept) — https://docs.gitlab.com/user/project/repository/branches/protected/
+- GitHub : rulesets (protection de branches) — https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets
 - `git push` (option `-u` / `--set-upstream`) — https://git-scm.com/docs/git-push
 - GitHub : changer la branche par défaut — https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/changing-the-default-branch
 - `gh repo edit` (`--default-branch`) — https://cli.github.com/manual/gh_repo_edit
