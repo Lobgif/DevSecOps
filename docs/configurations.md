@@ -255,6 +255,44 @@ git push -u gitlab feature/github
     (ex. compte école) ; jeton OAuth de Credential Manager sans le droit d'écriture.
   - Correctifs possibles : token d'accès personnel avec le scope `write_repository` (username =
     `IbrahimaFofana`, password = le token) ; ou SSH pour GitLab, qui fonctionne déjà.
+  - **Retenu :** exception à la décision HTTPS → remote `gitlab` en **SSH**
+    (`git remote set-url gitlab git@gitlab.com:personnel4344847/DevSecOps.git`). GitHub reste en HTTPS.
+
+### 5.1 quater Renommer une branche déjà poussée (`feature/github` → `feature/cicd`)
+
+**Date :** 2026-09-27
+
+Git ne « renomme » pas une branche distante : on pousse le nouveau nom, puis on supprime l'ancien.
+Complication : `feature/github` est la **branche par défaut** sur les deux plateformes, et elle est
+**protégée** sur GitLab (GitLab protège automatiquement la branche par défaut). Une branche par défaut
+ou protégée ne peut pas être supprimée → changer le défaut et retirer la protection d'abord.
+
+```bash
+# 1. renommer en local (les modifications non commitées suivent)
+git branch -m feature/github feature/cicd
+
+# 2. pousser le nouveau nom sur les deux dépôts (-u : GitHub reste le remote suivi)
+git push -u github feature/cicd
+git push gitlab feature/cicd
+
+# 3. faire du nouveau nom la branche par défaut
+gh repo edit Lobgif/DevSecOps --default-branch feature/cicd
+glab api -X PUT "projects/personnel4344847%2FDevSecOps" -f default_branch=feature/cicd
+
+# 4. GitLab : retirer la protection de l'ancienne branche (le / du nom s'encode %2F dans l'URL)
+glab api -X DELETE "projects/personnel4344847%2FDevSecOps/protected_branches/feature%2Fgithub"
+
+# 5. supprimer l'ancienne branche distante
+git push github --delete feature/github
+git push gitlab --delete feature/github
+
+# 6. nettoyer les références locales vers les branches distantes supprimées
+git fetch --prune github
+git fetch --prune gitlab
+
+# vérifier
+git branch -vv
+```
 
 ### 5.1 ter Fins de ligne — `.gitattributes`
 
@@ -270,13 +308,20 @@ dossier de travail en CRLF. En phase 3 (Docker, Linux), un script shell en CRLF 
 - `*.bat`, `*.cmd`, `*.ps1` en CRLF (scripts Windows) ;
 - images, PDF, archives en `binary` (ni conversion, ni diff texte).
 
-**Après l'avoir ajouté**, re-normaliser les fichiers déjà suivis :
+**Après l'avoir créé**, l'ajouter **lui-même** puis re-normaliser les fichiers déjà suivis :
 
 ```bash
+git add .gitattributes            # indispensable : --renormalize ne touche QUE les fichiers déjà suivis
 git add --renormalize .
 git status
 git commit -m "Ajout .gitattributes : fins de ligne LF"
 ```
+
+- Piège rencontré : sans `git add .gitattributes`, le fichier reste non suivi (`??`) et le commit ne le
+  contient pas.
+- Vérifier les fins de ligne : `git ls-files --eol` (`i/` = dans le dépôt, `w/` = dans le dossier de
+  travail). Constat du 2026-09-27 : tout est déjà en LF dans le dépôt ; seuls trois `.gitignore` sont
+  en CRLF dans le dossier de travail (sans impact, corrigé au prochain checkout).
 
 ### 5.2 Référence SSH (non retenu, gardé pour plus tard)
 
