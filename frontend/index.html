@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>FleetTrack</title>
+</head>
+<body>
+  <h1>FleetTrack</h1>
+
+  <form id="form">
+    <input name="vehicle_id" placeholder="Véhicule" required>
+    <input name="lat" type="number" step="any" placeholder="Latitude" required>
+    <input name="lon" type="number" step="any" placeholder="Longitude" required>
+    <button type="submit">Envoyer</button>
+  </form>
+  <p id="error" style="color: red"></p>
+
+  <ul id="list"></ul>
+
+  <script>
+    const API = "http://localhost:8000";
+
+    async function loadPositions() {
+      const res = await fetch(`${API}/positions`);
+      const data = await res.json();
+      document.getElementById("list").innerHTML = data
+        .map(p => `<li>${p.vehicle_id} : ${p.lat}, ${p.lon} (${p.recorded_at})</li>`)
+        .join("");
+    }
+
+    document.getElementById("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const res = await fetch(`${API}/positions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vehicle_id: f.get("vehicle_id"),
+          lat: Number(f.get("lat")),
+          lon: Number(f.get("lon")),
+        }),
+      });
+      // 422 = Pydantic a refusé les données : on affiche sa réponse brute.
+      document.getElementById("error").textContent = res.ok ? "" : JSON.stringify(await res.json());
+      loadPositions();
+    });
+
+    loadPositions();
+  </script>
+</body>
+</html>
