@@ -1,0 +1,22 @@
+name: Mon premier workflow avec contexte
+
+on: push
+
+permissions:
+  contents: read # Permissions minimales
+
+jobs:
+  afficher-infos:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Qui a déclenché ce workflow ?
+        run: |
+          echo "Déclenché par : ${{ github.actor }}"
+
+      - name: Sur quelle branche ?
+        run: |
+          echo "Branche : ${{ github.ref }}"
+
+      - name: Quel événement a déclenché le workflow ?
+        run: |
+          echo "Événement : ${{ github.event_name }}"
