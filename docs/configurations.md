@@ -243,6 +243,41 @@ git push -u gitlab feature/github
   (vers le remote mémorisé ; pour l'autre, préciser le remote : `git push gitlab`).
 - Premier push HTTPS → Git Credential Manager ouvre le navigateur pour s'authentifier (une fois par plateforme).
 
+**Résultat du premier push (2026-09-27) :**
+- ✅ GitHub : `feature/github` poussée (commit `bdf3a94`). Elle est devenue la branche par défaut.
+- ❌ GitLab : échec d'authentification HTTPS, en deux temps :
+  1. `HTTP Basic: Access denied`, sans que la fenêtre de connexion apparaisse.
+  2. Deuxième essai : connexion navigateur OK (`please complete authentication in your browser...`),
+     puis `RPC failed; HTTP 401` pendant l'envoi → GitLab a refusé le jeton OAuth obtenu.
+  - Credential Manager **n'a rien stocké** : il n'enregistre un jeton qu'après un push réussi et
+    l'efface quand il est refusé.
+  - Causes possibles : navigateur connecté à un **autre compte GitLab** que le propriétaire du groupe
+    (ex. compte école) ; jeton OAuth de Credential Manager sans le droit d'écriture.
+  - Correctifs possibles : token d'accès personnel avec le scope `write_repository` (username =
+    `IbrahimaFofana`, password = le token) ; ou SSH pour GitLab, qui fonctionne déjà.
+
+### 5.1 ter Fins de ligne — `.gitattributes`
+
+**Date :** 2026-09-27
+
+**Problème :** avertissements `LF will be replaced by CRLF` au `git add`. Windows termine les lignes
+par CRLF, Linux par LF ; avec `core.autocrlf=true` (réglage local de cette machine), git convertit le
+dossier de travail en CRLF. En phase 3 (Docker, Linux), un script shell en CRLF plante.
+
+**Décision :** un `.gitattributes` à la racine, versionné, qui impose la règle **à toutes les machines**
+(contrairement à `core.autocrlf`, réglage personnel non partagé) :
+- `* text=auto eol=lf` : tout fichier texte est en LF, dans le dépôt comme dans le dossier de travail ;
+- `*.bat`, `*.cmd`, `*.ps1` en CRLF (scripts Windows) ;
+- images, PDF, archives en `binary` (ni conversion, ni diff texte).
+
+**Après l'avoir ajouté**, re-normaliser les fichiers déjà suivis :
+
+```bash
+git add --renormalize .
+git status
+git commit -m "Ajout .gitattributes : fins de ligne LF"
+```
+
 ### 5.2 Référence SSH (non retenu, gardé pour plus tard)
 
 **Diagnostic du 2026-09-27 :**
@@ -420,6 +455,10 @@ Sources officielles uniquement. Vérifiées le 2026-09-27.
 - GitHub : changer la branche par défaut — https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/changing-the-default-branch
 - `gh repo edit` (`--default-branch`) — https://cli.github.com/manual/gh_repo_edit
 - GitLab : branche par défaut — https://docs.gitlab.com/user/project/repository/branches/default/
+- `gitattributes` (`text`, `eol`, `binary`) — https://git-scm.com/docs/gitattributes
+- GitHub : gérer les fins de ligne — https://docs.github.com/en/get-started/git-basics/configuring-git-to-handle-line-endings
+- GitLab : dépannage git (dont `HTTP Basic: Access denied`) — https://docs.gitlab.com/topics/git/troubleshooting_git/
+- GitLab : tokens d'accès personnels — https://docs.gitlab.com/user/profile/personal_access_tokens/
 - `gitignore` — https://git-scm.com/docs/gitignore
 - Modèles `.gitignore` officiels de GitHub (Python, Node, Terraform…) — https://github.com/github/gitignore
 - Sous-modules (pourquoi éviter un dépôt imbriqué) — https://git-scm.com/book/en/v2/Git-Tools-Submodules
