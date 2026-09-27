@@ -1,0 +1,18 @@
+# Fins de ligne : LF dans le dépôt ET dans le dossier de travail, pour tous les fichiers texte.
+# Prioritaire sur le réglage local core.autocrlf de chaque machine.
+* text=auto eol=lf
+
+# Scripts Windows : doivent rester en CRLF pour s'exécuter correctement.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Fichiers binaires : jamais de conversion ni de diff texte.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
