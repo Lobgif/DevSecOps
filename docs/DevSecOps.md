@@ -22,7 +22,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 1. [Environnement Docker — WSL2 sans Docker Desktop](#1-environnement-docker--wsl2-sans-docker-desktop)
 2. [asdf — gestionnaire de versions d'outils](#2-asdf--gestionnaire-de-versions-doutils)
 3. [`wsl` ou `ssh` : entrer dans une machine](#3-wsl-ou-ssh--entrer-dans-une-machine)
-4. [Ressources](#ressources)
+4. [Images multi-plateformes — `docker buildx`](#4-images-multi-plateformes--docker-buildx)
+5. [Ressources](#ressources)
 
 ---
 
@@ -472,6 +473,42 @@ Sert à comprendre ce qu'est réellement une image (manifeste, config, couches).
 
 ---
 
+## 4. Images multi-plateformes — `docker buildx`
+
+**Date :** 2026-10-03 (lu dans le guide, pas encore pratiqué)
+
+**Pourquoi je n'ai jamais mis `--platform` ni `buildx` :** par défaut, Docker construit pour **la machine
+qui construit** (`linux/amd64` sur mon PC), et `docker build` utilise déjà buildx/BuildKit en coulisses.
+
+**Plateforme = `système/processeur` :** `linux/amd64` (PC, la plupart des serveurs — Intel/AMD) ;
+`linux/arm64` (Mac M1 et suivants, Raspberry Pi, serveurs cloud ARM). Une image amd64 ne tourne pas sur arm64
+→ on construit **une image par plateforme**, réunies sous un même nom par un **index** (voir 2.4, `crane manifest`).
+
+```bash
+docker buildx create --name multi-arch --driver docker-container --use
+docker buildx build --platform linux/amd64,linux/arm64 --tag mon-registry/mon-app:v1.0 --push .
+docker manifest inspect mon-registry/mon-app:v1.0
+```
+
+| Commande / option | Rôle |
+|---|---|
+| `buildx create` | Crée un nouveau **builder** (moteur de construction) |
+| `--name multi-arch` | Nom du builder |
+| `--driver docker-container` | Le builder (BuildKit) tourne dans un conteneur ; le builder par défaut (`docker`) ne produit pas d'image multi-plateforme avec le stockage d'images classique |
+| `--use` | Le sélectionne pour les prochains builds |
+| `buildx build --platform a,b` | Construit une version par plateforme |
+| `--tag` | Nom et version de l'image |
+| `--push` | Envoie au registre — nécessaire : le stockage local classique ne sait pas garder une image multi-plateforme |
+| `.` | Contexte de build (dossier du Dockerfile) |
+| `docker manifest inspect` | Affiche l'index : une entrée par plateforme |
+
+**À savoir :**
+- Construire de l'arm64 sur un PC amd64 passe par l'**émulation QEMU** (à installer sur Docker Engine, lente).
+- Utile si les serveurs cibles sont ARM ou si l'image doit tourner sur un Mac récent. Pas nécessaire tant que
+  tout est en amd64.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -516,6 +553,13 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Gérer les plugins (`plugin add`, `plugin update`) — https://asdf-vm.com/manage/plugins.html
 - Gérer les versions (`install`, `set`, `list`, `current`) — https://asdf-vm.com/manage/versions.html
 - Configuration (`.tool-versions`, variables d'environnement) — https://asdf-vm.com/manage/configuration.html
+
+### Build multi-plateforme
+- Builds multi-plateformes (plateformes, QEMU, index) — https://docs.docker.com/build/building/multi-platform/
+- Driver `docker-container` — https://docs.docker.com/build/builders/drivers/docker-container/
+- `docker buildx create` — https://docs.docker.com/reference/cli/docker/buildx/create/
+- `docker buildx build` (`--platform`, `--push`) — https://docs.docker.com/reference/cli/docker/buildx/build/
+- `docker manifest inspect` — https://docs.docker.com/reference/cli/docker/manifest/inspect/
 
 ### jq & crane
 - jq (site officiel) — https://jqlang.org/
