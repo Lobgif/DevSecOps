@@ -23,7 +23,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 2. [asdf — gestionnaire de versions d'outils](#2-asdf--gestionnaire-de-versions-doutils)
 3. [`wsl` ou `ssh` : entrer dans une machine](#3-wsl-ou-ssh--entrer-dans-une-machine)
 4. [Images multi-plateformes — `docker buildx`](#4-images-multi-plateformes--docker-buildx)
-5. [Ressources](#ressources)
+5. [Artefacts OCI — un registre ne stocke pas que des images](#5-artefacts-oci--un-registre-ne-stocke-pas-que-des-images)
+6. [Ressources](#ressources)
 
 ---
 
@@ -502,10 +503,35 @@ docker manifest inspect mon-registry/mon-app:v1.0
 | `.` | Contexte de build (dossier du Dockerfile) |
 | `docker manifest inspect` | Affiche l'index : une entrée par plateforme |
 
+**QEMU, c'est quoi ?** Un **émulateur** : il fait croire à un programme qu'il tourne sur un autre processeur,
+en traduisant à la volée ses instructions (arm64 → amd64). Docker s'en sert pour exécuter les `RUN` d'un
+Dockerfile arm64 sur un PC amd64. Fonctionne, mais lentement (souvent 5 à 10 fois plus).
+
 **À savoir :**
 - Construire de l'arm64 sur un PC amd64 passe par l'**émulation QEMU** (à installer sur Docker Engine, lente).
 - Utile si les serveurs cibles sont ARM ou si l'image doit tourner sur un Mac récent. Pas nécessaire tant que
   tout est en amd64.
+
+---
+
+## 5. Artefacts OCI — un registre ne stocke pas que des images
+
+**Date :** 2026-10-03 (lu dans le guide « Conteneurs »)
+
+La norme OCI permet de ranger dans un registre (Docker Hub, GitLab Registry…) **d'autres fichiers que des
+images**, avec le même système de noms, de versions et de droits.
+
+| Artefact | Ce que c'est | À quoi ça sert | Outils |
+|---|---|---|---|
+| Helm charts | Paquet décrivant une application Kubernetes | Installer une application sur un cluster en une commande | `helm push` |
+| SBOM | *Software Bill of Materials* : liste de tous les composants d'une image | Savoir si l'image contient une bibliothèque vulnérable | ORAS, Syft |
+| Signatures | Preuve cryptographique de qui a construit l'image | Vérifier l'origine et l'intégrité | Cosign, Notation |
+| Policies | Règles écrites en code (OPA / langage Rego) | Refuser automatiquement ce qui n'est pas conforme (ex. conteneur root) | Conftest |
+| Modules WASM | Programmes WebAssembly | Exécuter du code de façon plus légère qu'un conteneur | ORAS |
+
+**Pourquoi c'est important :** SBOM + signatures + policies = le cœur du **DevSecOps** (chaîne
+d'approvisionnement logicielle) : savoir ce que contient une image, prouver d'où elle vient, bloquer ce qui
+n'est pas conforme. À pratiquer plus tard.
 
 ---
 
@@ -560,6 +586,22 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `docker buildx create` — https://docs.docker.com/reference/cli/docker/buildx/create/
 - `docker buildx build` (`--platform`, `--push`) — https://docs.docker.com/reference/cli/docker/buildx/build/
 - `docker manifest inspect` — https://docs.docker.com/reference/cli/docker/manifest/inspect/
+
+### QEMU
+- QEMU (site officiel) — https://www.qemu.org/
+- Émulation en mode utilisateur — https://www.qemu.org/docs/master/user/main.html
+
+### Artefacts OCI & chaîne d'approvisionnement
+- OCI : recommandations sur les artefacts — https://github.com/opencontainers/image-spec/blob/main/artifacts-guidance.md
+- Helm : utiliser un registre OCI (`helm push`) — https://helm.sh/docs/topics/registries/
+- ORAS — https://oras.land/
+- Syft (génération de SBOM) — https://github.com/anchore/syft
+- SBOM (CISA) — https://www.cisa.gov/sbom
+- Cosign (signature) — https://docs.sigstore.dev/cosign/signing/overview/
+- Notation (Notary Project) — https://notaryproject.dev/
+- Conftest — https://www.conftest.dev/
+- Open Policy Agent / Rego — https://www.openpolicyagent.org/docs/latest/
+- WebAssembly — https://webassembly.org/
 
 ### jq & crane
 - jq (site officiel) — https://jqlang.org/
