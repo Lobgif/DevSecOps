@@ -520,7 +520,7 @@ entre racine et `infrastructures/` est libre (à trancher en phase 3).
 
 ## Ressources
 
-Sources officielles uniquement. Vérifiées le 2026-09-27.
+Sources officielles uniquement. Vérifiées les 2026-09-27 et 2026-09-28 (chaque URL répond).
 
 ### uv
 - Documentation — https://docs.astral.sh/uv/
