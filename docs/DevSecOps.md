@@ -420,6 +420,23 @@ Filtres de base :
 manifeste d'une seule image. C'est ce qui permet à `docker pull nginx` de choisir tout seul la bonne
 architecture — lien direct avec la norme **OCI** (section 1.9).
 
+**`grep` ou `jq` ?**
+
+| | `grep` | `jq` |
+|---|---|---|
+| Travaille sur | des **lignes de texte** | la **structure JSON** (clés, valeurs, tableaux) |
+| Question posée | « quelles lignes contiennent ce motif ? » | « quelle est la valeur de cette clé ? » |
+| Résultat | la ligne entière | la valeur exacte |
+| Transformer | non | oui (filtrer, trier, reconstruire) |
+
+Exemple avec `{"name":"nginx","tag":"1.25"}` : `grep name` renvoie toute la ligne ; `jq -r '.name'` renvoie
+`nginx`.
+
+- `grep` : texte libre — logs, fichiers de configuration, code source.
+- `jq` : dès que c'est du JSON — réponses d'API, `docker inspect`, `kubectl -o json`.
+- `grep` sur du JSON est fragile : JSON sur une seule ligne → tout est renvoyé ; mot présent dans une autre
+  clé → faux résultats.
+
 Déjà utilisé sans le savoir : `glab api … | jq -r '.[] | "\(.name) -> \(.full_path)"'` pour retrouver le
 chemin du groupe GitLab.
 
@@ -511,6 +528,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 
 ### Commandes shell
 - `curl` (`-L`, `-O`, `-s`) — https://curl.se/docs/manpage.html
+- `grep` (manuel GNU) — https://www.gnu.org/software/grep/manual/grep.html
 - `tar` (`-x`, `-z`, `-f`) — https://man7.org/linux/man-pages/man1/tar.1.html
 - `md5sum` — https://man7.org/linux/man-pages/man1/md5sum.1.html
 - Manuel de bash (`type`, `${VAR:-défaut}`, heredoc, `source`) — https://www.gnu.org/software/bash/manual/bash.html
