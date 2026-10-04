@@ -25,7 +25,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 4. [Images multi-plateformes — `docker buildx`](#4-images-multi-plateformes--docker-buildx)
 5. [Artefacts OCI — un registre ne stocke pas que des images](#5-artefacts-oci--un-registre-ne-stocke-pas-que-des-images)
 6. [Concepts Docker — image, conteneur, couches, isolation](#6-concepts-docker--image-conteneur-couches-isolation)
-7. [Ressources](#ressources)
+7. [autoheal — redémarrer les conteneurs « unhealthy »](#7-autoheal--redémarrer-les-conteneurs--unhealthy-)
+8. [Ressources](#ressources)
 
 ---
 
@@ -977,6 +978,40 @@ avec **TLS et certificats client**.
 
 ---
 
+## 7. autoheal — redémarrer les conteneurs « unhealthy »
+
+**Date :** 2026-10-04 (notion lue, pas encore pratiquée)
+
+**Le problème :** Docker sépare deux mécanismes.
+- `HEALTHCHECK` : teste régulièrement si l'application répond → état `healthy` / `unhealthy`.
+- Politique de redémarrage (`--restart=always`) : relance le conteneur **seulement quand son programme s'arrête**.
+
+Une application **bloquée mais pas arrêtée** est marquée `unhealthy`… et Docker ne fait rien. **autoheal**
+(conteneur communautaire `willfarrell/autoheal`) surveille les conteneurs et redémarre ceux qui passent
+`unhealthy`.
+
+```bash
+docker run -d --name autoheal --restart=always -e AUTOHEAL_CONTAINER_LABEL=autoheal   -v /var/run/docker.sock:/var/run/docker.sock willfarrell/autoheal
+docker run -d --label autoheal=true --health-cmd "curl -f http://localhost/ || exit 1" --health-interval 30s nginx
+```
+
+| Option | Rôle |
+|---|---|
+| `-e AUTOHEAL_CONTAINER_LABEL=autoheal` | Nom du label à surveiller (`all` = tous les conteneurs) |
+| `-v /var/run/docker.sock:…` | Lui permet de piloter Docker pour redémarrer les conteneurs |
+| `--label autoheal=true` | Marque le conteneur comme « à surveiller » |
+| `--health-cmd` | Commande de test : code 0 = sain, 1 = malade |
+| `--health-interval 30s` | Fréquence du test |
+
+**À savoir :**
+- ⚠️ Monte `docker.sock` → **pouvoir de root** sur l'hôte (comme Portainer) ; projet communautaire, pas officiel
+  Docker → lire son code avant usage.
+- Redémarrer ne répare pas la cause : une application malade toutes les heures a un vrai problème → lire les logs.
+- Inutile sur **Kubernetes** (les *liveness probes* redémarrent nativement un conteneur malade : self-healing)
+  et sur Docker Swarm. Utile avec Docker seul ou Docker Compose.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1051,6 +1086,13 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
 - `namespaces(7)` — https://man7.org/linux/man-pages/man7/namespaces.7.html
 - `cgroups(7)` — https://man7.org/linux/man-pages/man7/cgroups.7.html
+
+### Santé des conteneurs & autoheal
+- `HEALTHCHECK` (Dockerfile) — https://docs.docker.com/reference/dockerfile/#healthcheck
+- Options de santé de `docker run` (`--health-cmd`, `--health-interval`) — https://docs.docker.com/reference/cli/docker/container/run/#health
+- Politiques de redémarrage — https://docs.docker.com/engine/containers/start-containers-automatically/
+- autoheal (projet communautaire) — https://github.com/willfarrell/docker-autoheal
+- Kubernetes : liveness, readiness et startup probes — https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/
 
 ### Portainer & Swarm
 - Installer Portainer CE sous Linux — https://docs.portainer.io/start/install-ce/server/docker/linux
