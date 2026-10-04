@@ -927,6 +927,49 @@ docker context use monserveur
 docker context use default        # retour au Docker local
 ```
 
+### 6.12 Socket Unix ou réseau — `/var/run/docker.sock` et le port 2375
+
+Un **socket** est un point de connexion entre deux programmes.
+
+| | Socket Unix | Socket réseau (TCP) |
+|---|---|---|
+| Forme | Un **fichier** : `/var/run/docker.sock` | Une **IP + un port** : `192.168.1.10:2375` |
+| Qui peut s'y connecter | Les programmes de **la même machine** | Toute machine qui peut joindre l'adresse |
+| Contrôle d'accès | Droits du fichier (propriétaire, groupe) | Pare-feu, mot de passe ou certificat — sinon rien |
+
+**Le fichier `/var/run/docker.sock`** = la porte d'entrée de `dockerd`.
+
+```bash
+ls -l /var/run/docker.sock     # srw-rw---- 1 root docker 0 … /var/run/docker.sock
+```
+
+| Partie | Signification |
+|---|---|
+| `s` | Type **socket** (ni fichier `-`, ni dossier `d`) |
+| `rw-` `rw-` `---` | Propriétaire : lecture/écriture ; groupe : lecture/écriture ; autres : rien |
+| `root` / `docker` | Propriétaire / groupe → d'où l'accès donné par le groupe `docker` |
+| `0` | Taille nulle : un point de passage, pas un contenu |
+
+- `/var/run` → lien vers `/run` : `/run/docker.sock` est le même fichier (`API listen on /run/docker.sock`).
+- Créé par systemd (`docker.socket`) ; `/run` est en mémoire, il disparaît à l'arrêt.
+- Ce qui y circule est une **API HTTP** — on peut lui parler sans le client `docker` :
+
+```bash
+curl --unix-socket /var/run/docker.sock http://localhost/version      # même requête que `docker version`
+```
+
+`--unix-socket <fichier>` : curl passe par ce socket au lieu du réseau.
+
+**Pourquoi ne jamais ouvrir le port 2375 :**
+1. C'est la même API en version réseau, **sans chiffrement ni authentification** : les droits du fichier
+   (`root:docker`) n'existent plus.
+2. Parler à `dockerd` = être **root** sur la machine (6.10).
+3. Une seule commande à distance suffit : `docker -H tcp://serveur:2375 run -v /:/hostroot alpine …`.
+4. Des robots scannent Internet en permanence pour ce port (usage typique : minage de cryptomonnaie).
+
+**Alternatives sûres :** contexte Docker par **SSH** (`host=ssh://…`, aucun port en plus) ; ou port **2376**
+avec **TLS et certificats client**.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -997,6 +1040,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Fichier `config.json` du client — https://docs.docker.com/reference/cli/docker/#docker-cli-configuration-file-configjson-properties
 - Contextes Docker — https://docs.docker.com/engine/manage-resources/contexts/
 - `docker login` et stockage des identifiants — https://docs.docker.com/reference/cli/docker/login/#credential-stores
+- API du moteur Docker (Engine API) — https://docs.docker.com/reference/api/engine/
+- `unix(7)` (sockets Unix) — https://man7.org/linux/man-pages/man7/unix.7.html
 - Protéger l'accès au démon Docker — https://docs.docker.com/engine/security/protect-access/
 - Accès distant au démon (risques du port 2375) — https://docs.docker.com/engine/daemon/remote-access/
 - Tirer une image par son digest — https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier
