@@ -686,6 +686,60 @@ docker run --cap-drop ALL --cap-add NET_BIND_SERVICE nginx
 **Les trois protections :** namespaces = ce qu'il **voit** ; cgroups = ce qu'il **consomme** ; capabilities =
 ce qu'il a le **droit de faire**.
 
+### 6.5 seccomp et AppArmor
+
+**seccomp** — filtre les **appels système** (les demandes d'un programme au noyau : ouvrir un fichier, créer
+un processus, changer l'heure… plus de 300). Le profil par défaut de Docker en bloque une quarantaine, les
+plus dangereux (charger un module noyau, redémarrer la machine, changer l'heure…).
+
+**AppArmor** — associe à un programme un **profil** listant les fichiers et actions autorisés ; même root
+dans le conteneur ne peut pas en sortir. Profil Docker : `docker-default` (interdit par ex. d'écrire dans
+`/proc` et `/sys`). Équivalent sur Red Hat et dérivés : **SELinux**.
+
+**Vérifié sur ma machine (2026-10-04) :**
+
+```bash
+docker info --format '{{.SecurityOptions}}'      # → [name=seccomp,profile=builtin]
+```
+
+seccomp est actif (profil intégré). AppArmor **n'apparaît pas** : le noyau de WSL2 ne l'active pas — il le
+serait sur un vrai serveur Ubuntu.
+
+**Défense en profondeur — les 5 protections d'un conteneur :**
+
+| Protection | Contrôle |
+|---|---|
+| Namespaces | ce qu'il **voit** |
+| Cgroups | ce qu'il **consomme** |
+| Capabilities | les **pouvoirs de root** qu'il garde |
+| seccomp | les **appels au noyau** permis |
+| AppArmor / SELinux | les **fichiers et actions** autorisés par profil |
+
+### 6.6 `dockerd`, `containerd`, `runc` : qui fait quoi
+
+« Démon Docker » = `dockerd` (c'est le nom du programme).
+
+| | `dockerd` | `containerd` |
+|---|---|---|
+| Rôle | Chef d'orchestre de Docker | Exécutant des conteneurs |
+| Fait | Reçoit les commandes `docker` (API), construit les images, gère réseaux et volumes | Télécharge les images, démarre / arrête / surveille les conteneurs |
+| Qui lui parle | le client `docker` | `dockerd`, ou Kubernetes directement (CRI) |
+
+```
+docker (client) → dockerd → containerd → containerd-shim → runc → conteneur
+```
+
+- **`runc`** : crée réellement le conteneur (namespaces, cgroups, capabilities, seccomp), lance le programme,
+  puis se termine.
+- **`containerd-shim`** : un par conteneur, reste à côté pour le surveiller → on peut redémarrer `dockerd`
+  sans arrêter les conteneurs.
+
+**Vérifié sur ma machine :** `ps -eo comm | grep -E "dockerd|containerd"` → 1 `dockerd`, 1 `containerd`,
+3 `containerd-shim` (donc 3 conteneurs en marche) ; runtime par défaut `runc` v1.5.1.
+
+**Pourquoi ça compte :** Kubernetes n'a pas besoin de `dockerd` ; il parle directement à containerd — ce que
+fera k3s.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -734,6 +788,14 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Capabilities du noyau et Docker — https://docs.docker.com/engine/security/#linux-kernel-capabilities
 - `--cap-add`, `--cap-drop`, `--privileged` — https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
+- Profils seccomp pour Docker — https://docs.docker.com/engine/security/seccomp/
+- `seccomp(2)` — https://man7.org/linux/man-pages/man2/seccomp.2.html
+- Profils AppArmor pour Docker — https://docs.docker.com/engine/security/apparmor/
+- AppArmor (site officiel) — https://apparmor.net/
+- `dockerd` (référence) — https://docs.docker.com/reference/cli/dockerd/
+- containerd (site officiel) — https://containerd.io/
+- runc — https://github.com/opencontainers/runc
+- Live restore (conteneurs qui survivent au redémarrage du démon) — https://docs.docker.com/engine/daemon/live-restore/
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
 - `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
 - `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
