@@ -740,6 +740,50 @@ docker (client) → dockerd → containerd → containerd-shim → runc → cont
 **Pourquoi ça compte :** Kubernetes n'a pas besoin de `dockerd` ; il parle directement à containerd — ce que
 fera k3s.
 
+### 6.7 Lire `systemctl status docker` ligne par ligne
+
+Sortie observée le 2026-10-04 (`sudo systemctl status docker`).
+
+**En-tête**
+
+| Ligne | Signification |
+|---|---|
+| `● docker.service - Docker Application Container Engine` | Nom et description du service ; point vert = en marche |
+| `Loaded: loaded (/usr/lib/systemd/system/docker.service; enabled; preset: enabled)` | Fichier d'unité lu par systemd ; `enabled` = démarre automatiquement ; `preset` = réglage par défaut de la distribution |
+| `Active: active (running) since …; 23h ago` | État et durée de fonctionnement |
+| `TriggeredBy: ● docker.socket` | **Activation par socket** : systemd écoute `/run/docker.sock` et lance `dockerd` à la première connexion |
+| `Main PID: 283 (dockerd)` | Processus principal |
+| `Tasks: 17` | Fils d'exécution du service |
+| `Memory: 149.7M` | Mémoire du démon lui-même (hors conteneurs) |
+| `CGroup: /system.slice/docker.service` | cgroup où systemd range le service (même mécanisme que pour les conteneurs) |
+| `└─283 /usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock` | Commande exacte : `-H fd://` = écouter sur le socket transmis par systemd ; `--containerd=` = socket pour parler à containerd |
+
+**Journal** — format `date machine programme[PID]: message`
+
+| Message | Signification |
+|---|---|
+| `level=info` | Information, pas une erreur |
+| `image pulled digest="sha256:…"` | Image téléchargée ; **digest** = empreinte unique de son contenu |
+| `sbJoin: gwep4 ''->'91c9…', gwep6 ''->'' … ep=pedantic_chatelet net=bridge` | Un conteneur est branché au réseau : `ep` = son nom, `net=bridge` = réseau par défaut, `gwep4` = passerelle IPv4, `gwep6` vide = pas d'IPv6 |
+| `received task-delete event from containerd container=…` | containerd signale à dockerd qu'un conteneur s'est terminé |
+
+Lignes coupées (`>` en fin de ligne) → `journalctl -u docker --no-pager -n 20`
+(`-u` = unité ; `--no-pager` = sans défilement ; `-n 20` = 20 dernières lignes).
+
+**Lecture sécurité**
+
+| Élément | Ce qu'il faut vérifier |
+|---|---|
+| `-H fd://` | ✅ écoute locale seulement. `-H tcp://0.0.0.0:2375` = API ouverte au réseau **sans authentification** = root offert |
+| `Main PID … (dockerd)` | Le démon tourne en **root** : qui lui parle a le pouvoir de root |
+| `docker.socket` | Tout repose sur les droits du socket (`root:docker`, `660`) |
+| `digest` | Un tag (`nginx:1.25`) peut changer de contenu ; un digest jamais → en production, épingler `image@sha256:…` |
+| Journal | Révèle noms de conteneurs, images, horaires ; lisible par root et les groupes `adm` / `systemd-journal` |
+
+**`runc` et `containerd-shim` (rappel de 6.6) :** `runc` crée le conteneur puis se termine ;
+`containerd-shim` reste à côté de chaque conteneur (garde ses entrées/sorties et son code de fin) et permet
+de redémarrer `dockerd` sans arrêter les conteneurs.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -795,6 +839,12 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `dockerd` (référence) — https://docs.docker.com/reference/cli/dockerd/
 - containerd (site officiel) — https://containerd.io/
 - runc — https://github.com/opencontainers/runc
+- `systemctl` — https://www.freedesktop.org/software/systemd/man/latest/systemctl.html
+- `systemd.socket` (activation par socket) — https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html
+- `journalctl` — https://www.freedesktop.org/software/systemd/man/latest/journalctl.html
+- Protéger l'accès au démon Docker — https://docs.docker.com/engine/security/protect-access/
+- Accès distant au démon (risques du port 2375) — https://docs.docker.com/engine/daemon/remote-access/
+- Tirer une image par son digest — https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier
 - Live restore (conteneurs qui survivent au redémarrage du démon) — https://docs.docker.com/engine/daemon/live-restore/
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
 - `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
