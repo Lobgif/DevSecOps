@@ -593,6 +593,54 @@ docker stats --no-stream       # consommation et limites par conteneur → cgrou
 
 `--no-stream` : affiche une seule mesure au lieu de rafraîchir en continu.
 
+### 6.2 La couche R/W (lecture/écriture) par l'exemple
+
+**R/W** = *Read/Write*. Les couches d'une image sont en **lecture seule**. Au lancement d'un conteneur, Docker
+ajoute par-dessus une couche fine où le conteneur peut écrire. Image = livre imprimé ; couche R/W = feuille
+de calque posée dessus : on écrit sur le calque, jamais sur le livre.
+
+**Exemple 1 — ce qu'on écrit disparaît avec le conteneur**
+
+```bash
+docker run --name test1 alpine sh -c 'echo bonjour > /monfichier.txt'
+docker rm test1
+docker run --rm alpine cat /monfichier.txt      # → No such file or directory
+```
+
+Le fichier vivait dans la couche R/W de `test1`, supprimée avec lui. L'image `alpine` n'a pas changé.
+
+**Exemple 2 — voir le contenu de la couche R/W**
+
+```bash
+docker run --name test2 alpine sh -c 'echo bonjour > /monfichier.txt; rm /etc/hostname'
+docker diff test2
+docker rm test2
+```
+
+| Sortie de `docker diff` | Sens |
+|---|---|
+| `A /monfichier.txt` | **A**jouté |
+| `D /etc/hostname` | supprimé (**D**eleted) |
+| `C /etc` | modifié (**C**hanged) |
+
+**Exemple 3 — deux conteneurs, deux couches R/W**
+
+```bash
+docker run -d --name a nginx
+docker run -d --name b nginx
+```
+
+`a` et `b` partagent les mêmes couches de l'image (stockées une seule fois) mais ont chacun leur couche R/W :
+modifier un fichier dans `a` ne change rien dans `b`.
+
+| Élément | Rôle |
+|---|---|
+| `sh -c '<commandes>'` | Lance un shell dans le conteneur pour exécuter plusieurs commandes |
+| `docker diff <conteneur>` | Liste les changements du conteneur par rapport à son image |
+
+**Conséquence :** une base de données sans **volume** perd tout à la suppression du conteneur. Un volume vit
+en dehors de la couche R/W (`-v portainer_data:/data`).
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -636,6 +684,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Pilotes de stockage (couches, copy-on-write) — https://docs.docker.com/engine/storage/drivers/
 - Volumes — https://docs.docker.com/engine/storage/volumes/
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
+- `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
 - `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
 - `namespaces(7)` — https://man7.org/linux/man-pages/man7/namespaces.7.html
 - `cgroups(7)` — https://man7.org/linux/man-pages/man7/cgroups.7.html
