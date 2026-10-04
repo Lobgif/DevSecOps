@@ -476,6 +476,42 @@ Sert à comprendre ce qu'est réellement une image (manifeste, config, couches).
 (clés, `sshd_config`) — préparation de la phase « serveurs distants ».
 
 
+### 3.1 Pourquoi `ssh <alias>` fonctionne : `~/.ssh/config`, clés, `known_hosts`
+
+Un **alias** se déclare dans `~/.ssh/config` (ici celui de Windows). Forme générale :
+
+```
+Host mon-alias
+    HostName <adresse IP ou nom du serveur>
+    User <utilisateur distant>
+    IdentityFile ~/.ssh/<clé privée>
+    IdentitiesOnly yes
+```
+
+| Ligne | Rôle |
+|---|---|
+| `Host` | Le nom court que l'on tape |
+| `HostName` | La vraie adresse du serveur |
+| `User` | L'utilisateur distant |
+| `IdentityFile` | La **clé privée** à présenter |
+| `IdentitiesOnly yes` | N'essayer **que** cette clé (pas toutes celles de `~/.ssh`) |
+
+`ssh mon-alias` équivaut donc à `ssh -i ~/.ssh/<clé> <utilisateur>@<adresse>`.
+
+**Trois éléments doivent être réunis :**
+1. l'**alias** dans `~/.ssh/config` (poste de travail) ;
+2. la **paire de clés** : privée sur le poste, publique dans `~/.ssh/authorized_keys` de l'utilisateur distant —
+   le serveur accepte celui qui prouve posséder la clé privée, sans mot de passe ;
+3. l'**empreinte du serveur** dans `~/.ssh/known_hosts` : SSH vérifie à chaque connexion que c'est la même machine.
+
+**À savoir :**
+- `ssh ubunt-24.04` échouait (section 3) : ni alias, ni adresse réelle.
+- Le `~/.ssh` de **Windows** et celui d'**Ubuntu WSL** sont deux dossiers différents : un alias défini dans l'un
+  n'existe pas dans l'autre.
+- Une clé privée ne se partage ni ne se commite jamais.
+- J'ai un alias de ce type vers ma VM Oracle Cloud (ARM, partagée avec des sites en production → pas d'essais
+  risqués dessus).
+
 ---
 
 ## 4. Images multi-plateformes — `docker buildx`
@@ -973,6 +1009,25 @@ curl --unix-socket /var/run/docker.sock http://localhost/version      # même re
 **Alternatives sûres :** contexte Docker par **SSH** (`host=ssh://…`, aucun port en plus) ; ou port **2376**
 avec **TLS et certificats client**.
 
+### 6.13 `docker debug` n'existe pas dans Docker Engine — alternatives
+
+`docker debug web` → `docker: unknown command: docker debug` : la commande est une fonction de **Docker
+Desktop** (abonnement payant), absente de Docker Engine.
+
+| Besoin | Commande |
+|---|---|
+| Shell dans un conteneur en marche | `docker exec -it web sh` |
+| Conteneur sans shell (image minimale) | `docker run --rm -it --pid=container:web --network=container:web busybox sh` |
+
+| Option | Rôle |
+|---|---|
+| `exec -it <conteneur> <commande>` | Lance une commande dans un conteneur déjà en marche, avec un terminal |
+| `--pid=container:web` | Partage le **namespace PID** de `web` : on voit ses processus |
+| `--network=container:web` | Partage son **namespace réseau** : même IP, mêmes ports |
+
+Le second cas applique directement les namespaces (6.1) : un conteneur d'outils « entre » dans les namespaces
+d'un autre.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -1155,6 +1210,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Tirer une image par son digest — https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier
 - Live restore (conteneurs qui survivent au redémarrage du démon) — https://docs.docker.com/engine/daemon/live-restore/
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
+- `docker debug` (Docker Desktop uniquement) — https://docs.docker.com/reference/cli/docker/debug/
+- `docker exec` — https://docs.docker.com/reference/cli/docker/container/exec/
 - `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
 - `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
 - `namespaces(7)` — https://man7.org/linux/man-pages/man7/namespaces.7.html
@@ -1223,5 +1280,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `tar` (`-x`, `-z`, `-f`) — https://man7.org/linux/man-pages/man1/tar.1.html
 - `md5sum` — https://man7.org/linux/man-pages/man1/md5sum.1.html
 - Manuel de bash (`type`, `${VAR:-défaut}`, heredoc, `source`) — https://www.gnu.org/software/bash/manual/bash.html
-- `ssh` (`-b`, destination) — https://man.openbsd.org/ssh
+- `ssh` (`-b`, `-i`, destination, authentification par clé) — https://man.openbsd.org/ssh
+- `ssh_config` (`Host`, `HostName`, `User`, `IdentityFile`, `IdentitiesOnly`) — https://man.openbsd.org/ssh_config
+- `sshd` : format de `authorized_keys` — https://man.openbsd.org/sshd#AUTHORIZED_KEYS_FILE_FORMAT
 - Commandes de base de WSL (`wsl -d`, `-l -v`, `--terminate`) — https://learn.microsoft.com/fr-fr/windows/wsl/basic-commands
