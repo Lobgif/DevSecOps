@@ -1133,6 +1133,32 @@ données) ; `PIDS` (nombre de processus — une explosion = programme qui se mul
 **Piège :** sans `--memory`, la colonne `LIMIT` affiche **toute la mémoire de l'hôte** → aucune limite réelle.
 Toujours fixer `--memory` (et `--cpus`, `--pids-limit`).
 
+### 9.1 Le swap et `--memory-swap`
+
+**Swap** = une partie du **disque** utilisée comme mémoire de secours quand la RAM est pleine : Linux y déplace
+les données les moins utilisées. Le programme n'est pas tué, mais le disque est des milliers de fois plus lent
+que la RAM.
+
+```bash
+docker run -d --memory=512m --memory-swap=1g mon_app
+```
+
+| Option | Rôle |
+|---|---|
+| `--memory=512m` | RAM maximale |
+| `--memory-swap=1g` | **Total** RAM + swap (pas la quantité de swap) → ici 512 Mo de swap |
+
+| Réglage | Résultat |
+|---|---|
+| `--memory=512m --memory-swap=1g` | 512 Mo RAM + 512 Mo swap |
+| `--memory=512m --memory-swap=512m` | 512 Mo RAM, aucun swap |
+| `--memory=512m` seul | Par défaut, autant de swap que de RAM |
+| `--memory-swap=-1` | Swap illimité |
+
+**Déconseillé en production :** masque le manque de mémoire (lenteur silencieuse au lieu d'un OOM clair, code
+137) ; ralentit toute la machine (disque partagé) ; Kubernetes demande traditionnellement de désactiver le
+swap sur les nœuds. Vraie réponse : augmenter `--memory` ou corriger la fuite.
+
 ---
 
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
@@ -1210,6 +1236,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Tirer une image par son digest — https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier
 - Live restore (conteneurs qui survivent au redémarrage du démon) — https://docs.docker.com/engine/daemon/live-restore/
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
+- `--memory-swap` en détail — https://docs.docker.com/engine/containers/resource_constraints/#--memory-swap-details
+- Kubernetes et le swap — https://kubernetes.io/docs/concepts/cluster-administration/swap-memory-management/
 - `docker debug` (Docker Desktop uniquement) — https://docs.docker.com/reference/cli/docker/debug/
 - `docker exec` — https://docs.docker.com/reference/cli/docker/container/exec/
 - `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
