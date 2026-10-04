@@ -27,7 +27,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 6. [Concepts Docker — image, conteneur, couches, isolation](#6-concepts-docker--image-conteneur-couches-isolation)
 7. [autoheal — redémarrer les conteneurs « unhealthy »](#7-autoheal--redémarrer-les-conteneurs--unhealthy-)
 8. [Logs d'un conteneur : `docker logs` et les pilotes de logs](#8-logs-dun-conteneur--docker-logs-et-les-pilotes-de-logs)
-9. [Ressources](#ressources)
+9. [`docker stats` : quelles colonnes surveiller, et pourquoi](#9-docker-stats--quelles-colonnes-surveiller-et-pourquoi)
+10. [Ressources](#ressources)
 
 ---
 
@@ -1051,6 +1052,31 @@ quand les logs partiront vers Loki.
 | `permission denied` | Droits : fichier, volume, port < 1024, utilisateur non root |
 | `connection refused` | Service visé injoignable : mauvais port ou nom d'hôte, ou pas encore démarré |
 | *stack trace* | Fonctions en cours au moment du plantage ; l'erreur réelle est en première ou dernière ligne |
+
+---
+
+## 9. `docker stats` : quelles colonnes surveiller, et pourquoi
+
+**Date :** 2026-10-04 (lecture du guide)
+
+```bash
+docker stats --no-stream        # une seule mesure (sans --no-stream : rafraîchi en continu)
+```
+
+| Colonne | Pourquoi la surveiller | Si ça dérape |
+|---|---|---|
+| **MEM USAGE / LIMIT** | La plus critique : la mémoire ne se « ralentit » pas | À la limite, le noyau **tue** le conteneur (OOM, code 137). Une courbe qui monte sans redescendre = **fuite de mémoire** |
+| **CPU %** | Travail normal, boucle infinie ou saturation | Le conteneur est **ralenti**, pas tué ; 100 % en continu sans raison = alerte |
+| **NET I/O** | Le conteneur communique-t-il, et combien | Zéro sur un serveur web = il ne reçoit rien ; sortant énorme inattendu = boucle d'appels ou conteneur **compromis** |
+
+**Différence clé :** le CPU est une ressource **compressible** (on étrangle, le conteneur continue) ; la mémoire
+est **incompressible** (on refuse, le conteneur est tué).
+
+**Autres colonnes :** `MEM %` (même info en pourcentage) ; `BLOCK I/O` (lectures/écritures disque — bases de
+données) ; `PIDS` (nombre de processus — une explosion = programme qui se multiplie sans fin).
+
+**Piège :** sans `--memory`, la colonne `LIMIT` affiche **toute la mémoire de l'hôte** → aucune limite réelle.
+Toujours fixer `--memory` (et `--cpus`, `--pids-limit`).
 
 ---
 
