@@ -886,6 +886,47 @@ docker run --rm -v /:/hostroot:ro alpine cat /hostroot/etc/shadow       # → af
 - Ne pas monter `docker.sock` dans un conteneur sans nécessité (même pouvoir) — cas de Portainer (1.6).
 - Sur un serveur : **mode rootless** (`dockerd` sous un utilisateur ordinaire) → l'attaque ne donne plus root.
 
+### 6.11 Le client `docker` : `DOCKER_HOST` et `~/.docker/config.json`
+
+Le client `docker` et le démon `dockerd` sont **deux programmes** : le client envoie des requêtes à l'API du
+démon — par défaut via `/var/run/docker.sock`, mais aussi vers un démon **distant**.
+
+```bash
+export DOCKER_HOST=tcp://remote-host:2376
+docker ps
+cat ~/.docker/config.json
+```
+
+| Élément | Rôle |
+|---|---|
+| `export` | Définit une variable pour ce terminal et les programmes qu'il lance |
+| `DOCKER_HOST` | Adresse du démon que le client doit contacter |
+| `tcp://` | Par le réseau, au lieu du socket local |
+| `2376` | Port de l'API Docker **chiffrée (TLS)** ; `2375` = sans chiffrement ni authentification (dangereux) |
+| `~/.docker/config.json` | Configuration du **client** : identifiants de registres, proxy, format d'affichage… |
+
+**Ce que j'ai obtenu (2026-10-04) et pourquoi :**
+
+| Sortie | Explication |
+|---|---|
+| `cat: …/config.json: No such file or directory` | Normal : le fichier n'est créé qu'au premier `docker login` ou réglage du client |
+| `failed to connect … lookup remote-host on 10.255.255.254:53: no such host` | `remote-host` est un **nom d'exemple** du guide ; le DNS de WSL (`10.255.255.254`) ne le connaît pas |
+
+**Piège :** après l'`export`, **toutes** les commandes `docker` du terminal échouent (le client cherche le
+serveur distant). Annuler avec `unset DOCKER_HOST`.
+
+**Lecture sécurité :**
+- `config.json` peut contenir les **mots de passe de registre en base64** (encodage, pas chiffrement) quand
+  aucun gestionnaire d'identifiants n'est configuré → ne jamais le commiter ni le copier dans une image.
+- Ne jamais ouvrir le port 2375.
+- Méthode recommandée pour un démon distant : **SSH** + **contexte**, sans port supplémentaire ni variable à annuler :
+
+```bash
+docker context create monserveur --docker "host=ssh://utilisateur@adresse"
+docker context use monserveur
+docker context use default        # retour au Docker local
+```
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -952,6 +993,10 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Lire les logs du démon — https://docs.docker.com/engine/daemon/logs/
 - `systemd.socket` (activation par socket) — https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html
 - `journalctl` — https://www.freedesktop.org/software/systemd/man/latest/journalctl.html
+- Variables d'environnement du client (`DOCKER_HOST`) — https://docs.docker.com/reference/cli/docker/#environment-variables
+- Fichier `config.json` du client — https://docs.docker.com/reference/cli/docker/#docker-cli-configuration-file-configjson-properties
+- Contextes Docker — https://docs.docker.com/engine/manage-resources/contexts/
+- `docker login` et stockage des identifiants — https://docs.docker.com/reference/cli/docker/login/#credential-stores
 - Protéger l'accès au démon Docker — https://docs.docker.com/engine/security/protect-access/
 - Accès distant au démon (risques du port 2375) — https://docs.docker.com/engine/daemon/remote-access/
 - Tirer une image par son digest — https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier
