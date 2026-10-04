@@ -641,6 +641,51 @@ modifier un fichier dans `a` ne change rien dans `b`.
 **Conséquence :** une base de données sans **volume** perd tout à la suppression du conteneur. Un volume vit
 en dehors de la couche R/W (`-v portainer_data:/data`).
 
+### 6.3 Volumes : stocker en dehors du conteneur
+
+Un **volume** est un espace de stockage **hors de la couche R/W** : les données survivent à la suppression du
+conteneur.
+
+| Type | Où sont les données | Usage | Exemple |
+|---|---|---|---|
+| Volume nommé | Dossier géré par Docker (`/var/lib/docker/volumes/`) | Données d'application (base, fichiers envoyés) | `-v portainer_data:/data` |
+| Bind mount | Dossier **de l'hôte** que je choisis | Développement : le conteneur voit mes modifications tout de suite | `-v /home/lahigic/monprojet:/app` |
+| tmpfs | Mémoire vive, jamais sur disque | Données temporaires ou sensibles | `--tmpfs /tmp` |
+| Volume anonyme | Volume sans nom, identifiant aléatoire | À éviter (difficile à retrouver) | `-v /data` |
+
+- Distinguer dans `-v` : `nom:/chemin` (pas de `/` au début) = **volume nommé** ; `/chemin/hote:/chemin` = **bind mount**.
+- `:ro` à la fin = lecture seule (`-v /home/lahigic/conf:/conf:ro`).
+- ⚠️ Un bind mount donne un accès direct aux fichiers de l'hôte ; `-v /:/host` donne **toute** la machine.
+
+### 6.4 Capabilities : ce que le conteneur a le droit de faire
+
+Sous Linux, root a tous les droits. Les **capabilities** découpent ce pouvoir en petits droits séparés, qu'on
+donne ou retire un par un.
+
+| Capability | Autorise |
+|---|---|
+| `NET_BIND_SERVICE` | Écouter sur un port < 1024 (80, 443) |
+| `CHOWN` | Changer le propriétaire d'un fichier |
+| `NET_ADMIN` | Modifier la configuration réseau et le pare-feu |
+| `SYS_ADMIN` | Une très large part des pouvoirs de root (montages…) — la plus dangereuse |
+| `SYS_TIME` | Changer l'heure du système |
+
+**Par défaut**, Docker ne laisse au conteneur qu'une liste réduite de capabilities, même si le processus est
+root dedans (`SYS_ADMIN`, `NET_ADMIN`, `SYS_TIME`… sont retirées).
+
+```bash
+docker run --cap-drop ALL --cap-add NET_BIND_SERVICE nginx
+```
+
+| Option | Rôle |
+|---|---|
+| `--cap-drop ALL` | Retire toutes les capabilities |
+| `--cap-add <nom>` | En rend une seule (moindre privilège) |
+| `--privileged` | ⚠️ Donne **toutes** les capabilities et l'accès au matériel : équivalent root sur l'hôte. À éviter |
+
+**Les trois protections :** namespaces = ce qu'il **voit** ; cgroups = ce qu'il **consomme** ; capabilities =
+ce qu'il a le **droit de faire**.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -682,7 +727,13 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `docker stop` (SIGTERM puis SIGKILL) — https://docs.docker.com/reference/cli/docker/container/stop/
 - `docker kill` — https://docs.docker.com/reference/cli/docker/container/kill/
 - Pilotes de stockage (couches, copy-on-write) — https://docs.docker.com/engine/storage/drivers/
+- Stockage : volumes, bind mounts, tmpfs (vue d'ensemble) — https://docs.docker.com/engine/storage/
 - Volumes — https://docs.docker.com/engine/storage/volumes/
+- Bind mounts — https://docs.docker.com/engine/storage/bind-mounts/
+- tmpfs — https://docs.docker.com/engine/storage/tmpfs/
+- Capabilities du noyau et Docker — https://docs.docker.com/engine/security/#linux-kernel-capabilities
+- `--cap-add`, `--cap-drop`, `--privileged` — https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities
+- `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
 - `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
 - `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
