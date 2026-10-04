@@ -28,7 +28,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 7. [autoheal — redémarrer les conteneurs « unhealthy »](#7-autoheal--redémarrer-les-conteneurs--unhealthy-)
 8. [Logs d'un conteneur : `docker logs` et les pilotes de logs](#8-logs-dun-conteneur--docker-logs-et-les-pilotes-de-logs)
 9. [`docker stats` : quelles colonnes surveiller, et pourquoi](#9-docker-stats--quelles-colonnes-surveiller-et-pourquoi)
-10. [Ressources](#ressources)
+10. [PID 1 et les signaux : pourquoi `docker stop` met 10 secondes](#10-pid-1-et-les-signaux--pourquoi-docker-stop-met-10-secondes)
+11. [Ressources](#ressources)
 
 ---
 
@@ -1161,6 +1162,61 @@ swap sur les nœuds. Vraie réponse : augmenter `--memory` ou corriger la fuite.
 
 ---
 
+## 10. PID 1 et les signaux : pourquoi `docker stop` met 10 secondes
+
+**Date :** 2026-10-04 (lecture du guide ; exemples à pratiquer)
+
+**Vocabulaire**
+- **Signal** : message envoyé par le système à un programme. `SIGTERM` = « arrête-toi proprement » ;
+  `SIGKILL` = tué immédiatement, impossible à intercepter.
+- **Handler** : la partie du programme qui réagit à un signal (finir les requêtes, fermer les fichiers…).
+- **PID 1** : premier programme du conteneur. Règle du noyau : PID 1 **ignore** un signal pour lequel il n'a
+  pas de handler (un processus ordinaire, lui, serait arrêté).
+
+**Conséquence :** `docker stop` envoie SIGTERM → ignoré → Docker attend le délai de grâce (10 s) → SIGKILL.
+Pas d'arrêt propre : connexions et écritures en cours coupées net.
+
+**Démonstration**
+
+```bash
+docker run -d --name lent alpine sleep 1000
+time docker stop lent            # ≈ 10 s : sleep (PID 1, sans handler) ignore SIGTERM, puis SIGKILL
+
+docker run -d --init --name rapide alpine sleep 1000
+time docker stop rapide          # < 1 s : tini (PID 1) reçoit SIGTERM et le relaie à sleep
+
+docker rm lent rapide
+```
+
+| Élément | Rôle |
+|---|---|
+| `--init` | Place un mini-init (`tini`) en PID 1 : il relaie les signaux et nettoie les processus zombies |
+| `time <commande>` | Mesure la durée d'exécution |
+
+**Cas réels**
+
+| Cas | Ce qui se passe sans arrêt propre |
+|---|---|
+| Base de données (PostgreSQL) | Pas le temps d'écrire les données en attente → réparation au redémarrage, perte possible |
+| API web (FastAPI) | Requête en cours coupée → le client reçoit une erreur pendant le déploiement |
+| Kubernetes | Délai de grâce de 30 s attendu **pour chaque** conteneur remplacé → mises à jour très lentes |
+| Script `start.sh` qui lance `./mon_app` | Le **shell** est PID 1, sans handler, et ne transmet rien à l'application |
+| `CMD python app.py` (forme shell) | PID 1 = `/bin/sh -c`, même piège |
+
+**Solutions**
+
+| Solution | Quand |
+|---|---|
+| `docker run --init` | Image non modifiable, ou programme qui ne gère pas les signaux |
+| `exec ./mon_app` dans le script | `exec` **remplace** le shell par l'application, qui devient PID 1 |
+| `CMD ["python", "app.py"]` (forme exec) | PID 1 = l'application directement — forme à préférer |
+| `STOPSIGNAL SIGINT` (Dockerfile) | L'application s'arrête proprement sur un autre signal que SIGTERM |
+
+**Diagnostic :** `docker stop` qui dure toujours ~10 s et code de sortie **137** → l'application n'a pas reçu
+(ou pas traité) SIGTERM.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1251,6 +1307,15 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Politiques de redémarrage — https://docs.docker.com/engine/containers/start-containers-automatically/
 - autoheal (projet communautaire) — https://github.com/willfarrell/docker-autoheal
 - Kubernetes : liveness, readiness et startup probes — https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/
+
+### PID 1 & signaux
+- `docker run --init` — https://docs.docker.com/reference/cli/docker/container/run/#init
+- Dockerfile : formes shell et exec (`CMD`, `ENTRYPOINT`) — https://docs.docker.com/reference/dockerfile/#shell-and-exec-form
+- Dockerfile : `STOPSIGNAL` — https://docs.docker.com/reference/dockerfile/#stopsignal
+- tini (le mini-init utilisé par `--init`) — https://github.com/krallin/tini
+- `signal(7)` — https://man7.org/linux/man-pages/man7/signal.7.html
+- `kill(2)` (règle des signaux envoyés à PID 1) — https://man7.org/linux/man-pages/man2/kill.2.html
+- Kubernetes : arrêt d'un pod (délai de grâce) — https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination
 
 ### Portainer & Swarm
 - Installer Portainer CE sous Linux — https://docs.portainer.io/start/install-ce/server/docker/linux
