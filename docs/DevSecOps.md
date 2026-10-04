@@ -857,6 +857,35 @@ PID 275, après redémarrage de WSL) :
 Options utiles : `-u <unité>`, `-n 50` (dernières lignes), `-f` (suivre en direct), `--since "1 hour ago"`,
 `-p warning` (à partir du niveau warning), `--no-pager`.
 
+### 6.10 Pourquoi le groupe `docker` équivaut à root — la démonstration
+
+```bash
+docker run -v /:/hostroot -it alpine chroot /hostroot      # → shell root sur l'hôte
+```
+
+| Élément | Rôle |
+|---|---|
+| `-v /:/hostroot` | Bind mount de **tout le disque de l'hôte** dans le conteneur |
+| `-i` | Garde l'entrée standard ouverte |
+| `-t` | Crée un terminal |
+| `chroot /hostroot` | Change la racine : le shell prend `/hostroot` pour `/` → on est « dans » l'hôte |
+
+**Pourquoi ça marche :** le processus du conteneur est **root** par défaut ; le montage est fait par `dockerd`
+(root), qui ne vérifie pas les droits de l'utilisateur qui le demande. Résultat : accès à tous les fichiers de
+l'hôte (`/etc/shadow`, `/etc/sudoers`, clés SSH de root…) sans `sudo` ni mot de passe.
+
+**Démonstration sans risque (lecture seule, `:ro`) :**
+
+```bash
+cat /etc/shadow                                                        # → Permission denied
+docker run --rm -v /:/hostroot:ro alpine cat /hostroot/etc/shadow       # → affiche le fichier
+```
+
+**Règles :**
+- N'ajouter au groupe `docker` que des personnes à qui on donnerait `sudo`.
+- Ne pas monter `docker.sock` dans un conteneur sans nécessité (même pouvoir) — cas de Portainer (1.6).
+- Sur un serveur : **mode rootless** (`dockerd` sous un utilisateur ordinaire) → l'attaque ne donne plus root.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -905,6 +934,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Capabilities du noyau et Docker — https://docs.docker.com/engine/security/#linux-kernel-capabilities
 - `--cap-add`, `--cap-drop`, `--privileged` — https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
+- `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
 - Profils seccomp pour Docker — https://docs.docker.com/engine/security/seccomp/
 - `seccomp(2)` — https://man7.org/linux/man-pages/man2/seccomp.2.html
 - Profils AppArmor pour Docker — https://docs.docker.com/engine/security/apparmor/
