@@ -26,7 +26,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 5. [Artefacts OCI — un registre ne stocke pas que des images](#5-artefacts-oci--un-registre-ne-stocke-pas-que-des-images)
 6. [Concepts Docker — image, conteneur, couches, isolation](#6-concepts-docker--image-conteneur-couches-isolation)
 7. [autoheal — redémarrer les conteneurs « unhealthy »](#7-autoheal--redémarrer-les-conteneurs--unhealthy-)
-8. [Ressources](#ressources)
+8. [Logs d'un conteneur : `docker logs` et les pilotes de logs](#8-logs-dun-conteneur--docker-logs-et-les-pilotes-de-logs)
+9. [Ressources](#ressources)
 
 ---
 
@@ -1012,6 +1013,47 @@ docker run -d --label autoheal=true --health-cmd "curl -f http://localhost/ || e
 
 ---
 
+## 8. Logs d'un conteneur : `docker logs` et les pilotes de logs
+
+**Date :** 2026-10-04 (lecture du guide)
+
+Ce qu'un conteneur écrit sur sa sortie est récupéré par Docker et confié à un **pilote de logs** (*log driver*),
+qui décide **où** vont les lignes.
+
+| Pilote | Destination | `docker logs` ? |
+|---|---|---|
+| `json-file` | Fichier sur l'hôte, géré par Docker | ✅ |
+| `local` | Idem, format compact | ✅ |
+| `journald` | Journal de systemd | ✅ (Docker sait le relire) ; aussi `journalctl CONTAINER_NAME=<nom>` |
+| `syslog` | Service de journalisation du système | ❌ chercher dans syslog |
+| `fluentd` | Collecteur de logs externe | ❌ chercher dans le collecteur |
+
+Avec un pilote qui envoie les logs ailleurs, Docker n'en garde pas de copie → `docker logs` vide. (Les versions
+récentes gardent par défaut une petite copie locale, le *dual logging*, qui peut être désactivée.)
+
+```bash
+docker inspect --format='{{.HostConfig.LogConfig.Type}}' mon_conteneur
+```
+
+| Élément | Rôle |
+|---|---|
+| `docker inspect` | Toute la configuration du conteneur, en JSON |
+| `--format='{{…}}'` | N'affiche qu'un champ (modèle Go) |
+| `.HostConfig.LogConfig.Type` | Chemin du champ : le pilote de logs du conteneur |
+
+**Chez moi :** `json-file` (réglé dans `daemon.json`, voir 1.5) → `docker logs` fonctionne. Le cas se posera
+quand les logs partiront vers Loki.
+
+**Quoi chercher dans des logs :**
+
+| Message | Indique en général |
+|---|---|
+| `permission denied` | Droits : fichier, volume, port < 1024, utilisateur non root |
+| `connection refused` | Service visé injoignable : mauvais port ou nom d'hôte, ou pas encore démarré |
+| *stack trace* | Fonctions en cours au moment du plantage ; l'erreur réelle est en première ou dernière ligne |
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1029,6 +1071,11 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 ### Docker & WSL2
 - Installer Docker Engine sur Ubuntu — https://docs.docker.com/engine/install/ubuntu/
 - Post-installation (groupe `docker`, démarrage) — https://docs.docker.com/engine/install/linux-postinstall/
+- Configurer les pilotes de logs — https://docs.docker.com/engine/logging/configure/
+- Dual logging (lire les logs malgré un pilote distant) — https://docs.docker.com/engine/logging/dual-logging/
+- Pilote `journald` — https://docs.docker.com/engine/logging/drivers/journald/
+- `docker logs` — https://docs.docker.com/reference/cli/docker/container/logs/
+- `docker inspect` (`--format`) — https://docs.docker.com/reference/cli/docker/inspect/
 - Pilote de logs `json-file` (rotation `max-size`, `max-file`) — https://docs.docker.com/engine/logging/drivers/json-file/
 - Mode rootless — https://docs.docker.com/engine/security/rootless/
 - Surface d'attaque du démon Docker (groupe `docker` ≈ root) — https://docs.docker.com/engine/security/#docker-daemon-attack-surface
