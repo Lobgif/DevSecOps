@@ -24,7 +24,8 @@ surtout le **pourquoi**. Tenu au fil de l'eau.
 3. [`wsl` ou `ssh` : entrer dans une machine](#3-wsl-ou-ssh--entrer-dans-une-machine)
 4. [Images multi-plateformes — `docker buildx`](#4-images-multi-plateformes--docker-buildx)
 5. [Artefacts OCI — un registre ne stocke pas que des images](#5-artefacts-oci--un-registre-ne-stocke-pas-que-des-images)
-6. [Ressources](#ressources)
+6. [Concepts Docker — image, conteneur, couches, isolation](#6-concepts-docker--image-conteneur-couches-isolation)
+7. [Ressources](#ressources)
 
 ---
 
@@ -535,6 +536,33 @@ n'est pas conforme. À pratiquer plus tard.
 
 ---
 
+## 6. Concepts Docker — image, conteneur, couches, isolation
+
+**Date :** 2026-10-04 (lecture du guide « Concepts Docker »)
+
+| Concept | L'essentiel | Déjà vu en pratique |
+|---|---|---|
+| Image / conteneur | Image = **modèle immuable** fait de couches, stocké sur disque. Conteneur = **instance en exécution** avec une couche lecture/écriture éphémère. 1 image → N conteneurs indépendants | `hello-world` : une image, plusieurs conteneurs |
+| `docker run` | Enchaîne `docker pull` → `docker create` → `docker start` | `docker create` seul pour `testlog` (1.5) |
+| Cycle de vie | created → running ↔ paused → exited → removed | `Exited (0)` dans `docker ps -a` |
+| `docker stop` | Envoie **SIGTERM** (arrêt propre), puis **SIGKILL** après 10 s | — |
+| `docker kill` | **SIGKILL** immédiat | — |
+| Code de sortie 137 | 128 + 9 (SIGKILL) : arrêt forcé — `docker kill` ou manque de mémoire (OOM) | — |
+| Couches (layers) | Partagées entre images : moins de disque, cache de build, téléchargements plus courts | — |
+| Copy-on-Write | Modifier un fichier le **copie** d'abord dans la couche R/W du conteneur ; cette couche **disparaît** à la suppression du conteneur | D'où le **volume** `portainer_data` (1.6) |
+| Namespaces | Isolent ce que le conteneur **voit** : PID, réseau, mount, UTS (nom d'hôte), IPC, user | — |
+| Cgroups | Limitent ce qu'il **consomme** : `--cpus`, `--memory` | Avertissements `No blkio` (1.3) |
+| PID 1 | Le processus principal du conteneur ; c'est lui qui reçoit les signaux | — |
+| Architecture | Client `docker` → API REST → démon `dockerd` (root) via `/var/run/docker.sock` ; registres : Docker Hub, Harbor, ECR… | Message de `hello-world`, `systemctl status docker` |
+| Sécurité | Accès au socket ou groupe `docker` = équivalent **root** sur l'hôte | `usermod -aG docker` (1.4), `docker.sock` de Portainer (1.6) |
+
+**À retenir :**
+1. Une image ne change jamais ; un conteneur est jetable.
+2. Tout ce qui doit survivre va dans un **volume**.
+3. Un conteneur n'est pas une machine virtuelle : c'est un **processus Linux isolé** (namespaces) et **limité** (cgroups).
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -544,6 +572,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 
 ### Guide suivi — Stéphane Robert (non officiel, fil conducteur de l'apprentissage)
 - Conteneurs — https://blog.stephane-robert.info/docs/conteneurs/
+- Concepts Docker — https://blog.stephane-robert.info/docs/conteneurs/moteurs-conteneurs/docker/concepts/
 - asdf-vm — https://blog.stephane-robert.info/docs/outils/systeme/asdf-vm/
 - jq : traiter du JSON en ligne de commande — https://blog.stephane-robert.info/docs/admin-serveurs/linux/references/jq/
 - crane — https://blog.stephane-robert.info/docs/conteneurs/outils/crane/
@@ -561,6 +590,17 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Configuration WSL (`wsl.conf`, `appendWindowsPath`) — https://learn.microsoft.com/fr-fr/windows/wsl/wsl-config
 - `usermod` (options `-a`, `-G`) — https://man7.org/linux/man-pages/man8/usermod.8.html
 - `newgrp` — https://man7.org/linux/man-pages/man1/newgrp.1.html
+
+### Concepts Docker
+- Vue d'ensemble de Docker (architecture client / démon / registre) — https://docs.docker.com/get-started/docker-overview/
+- `docker run` — https://docs.docker.com/reference/cli/docker/container/run/
+- `docker stop` (SIGTERM puis SIGKILL) — https://docs.docker.com/reference/cli/docker/container/stop/
+- `docker kill` — https://docs.docker.com/reference/cli/docker/container/kill/
+- Pilotes de stockage (couches, copy-on-write) — https://docs.docker.com/engine/storage/drivers/
+- Volumes — https://docs.docker.com/engine/storage/volumes/
+- Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
+- `namespaces(7)` — https://man7.org/linux/man-pages/man7/namespaces.7.html
+- `cgroups(7)` — https://man7.org/linux/man-pages/man7/cgroups.7.html
 
 ### Portainer & Swarm
 - Installer Portainer CE sous Linux — https://docs.portainer.io/start/install-ce/server/docker/linux
