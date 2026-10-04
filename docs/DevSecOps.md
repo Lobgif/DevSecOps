@@ -556,6 +556,43 @@ n'est pas conforme. À pratiquer plus tard.
 | Architecture | Client `docker` → API REST → démon `dockerd` (root) via `/var/run/docker.sock` ; registres : Docker Hub, Harbor, ECR… | Message de `hello-world`, `systemctl status docker` |
 | Sécurité | Accès au socket ou groupe `docker` = équivalent **root** sur l'hôte | `usermod -aG docker` (1.4), `docker.sock` de Portainer (1.6) |
 
+### 6.1 Namespaces et cgroups en détail
+
+Deux mécanismes du **noyau Linux** (Docker ne les a pas inventés, il les assemble).
+
+**Namespaces — ce que le conteneur *voit*** (des murs) : chaque namespace donne au processus sa propre vue
+d'une partie du système.
+
+| Namespace | Isole | Effet dans le conteneur |
+|---|---|---|
+| PID | les processus | ne voit que les siens ; son programme principal est le n° 1 |
+| net | cartes réseau, IP, ports | sa propre IP, ses propres ports |
+| mnt | les points de montage | son propre système de fichiers |
+| UTS | le nom d'hôte | son propre hostname |
+| IPC | la mémoire partagée | pas de communication avec les processus des autres conteneurs |
+| user | les utilisateurs | le root du conteneur peut être un utilisateur ordinaire sur l'hôte (**rootless**) |
+
+**Cgroups — ce que le conteneur *consomme*** (un compteur avec un plafond) : limitent et mesurent CPU,
+mémoire, I/O disque, nombre de processus d'un groupe de processus.
+
+```bash
+docker run --memory 256m --cpus 0.5 nginx
+```
+
+| Option | Rôle |
+|---|---|
+| `--memory 256m` | Plafond de mémoire ; dépassement → le noyau tue le conteneur (**OOM**, code de sortie 137) |
+| `--cpus 0.5` | Au plus la moitié d'un cœur |
+
+**Pour l'observer (à pratiquer) :**
+
+```bash
+docker run --rm alpine ps      # un seul processus, PID 1 → namespace PID (comparer avec `ps aux` sur l'hôte)
+docker stats --no-stream       # consommation et limites par conteneur → cgroups
+```
+
+`--no-stream` : affiche une seule mesure au lieu de rafraîchir en continu.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -599,6 +636,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Pilotes de stockage (couches, copy-on-write) — https://docs.docker.com/engine/storage/drivers/
 - Volumes — https://docs.docker.com/engine/storage/volumes/
 - Limites de ressources (`--cpus`, `--memory`) — https://docs.docker.com/engine/containers/resource_constraints/
+- `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
 - `namespaces(7)` — https://man7.org/linux/man-pages/man7/namespaces.7.html
 - `cgroups(7)` — https://man7.org/linux/man-pages/man7/cgroups.7.html
 
