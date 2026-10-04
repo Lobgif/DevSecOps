@@ -784,6 +784,79 @@ Lignes coupées (`>` en fin de ligne) → `journalctl -u docker --no-pager -n 20
 `containerd-shim` reste à côté de chaque conteneur (garde ses entrées/sorties et son code de fin) et permet
 de redémarrer `dockerd` sans arrêter les conteneurs.
 
+### 6.8 Le fichier `docker.service` ligne par ligne
+
+`/usr/lib/systemd/system/docker.service` (lu le 2026-10-04) = la fiche d'instructions de systemd : comment
+lancer `dockerd`, dans quel ordre, quoi faire s'il plante. Le lire montre comment Docker démarre réellement
+sur un serveur, et permet de vérifier qu'il n'est pas configuré dangereusement.
+
+**`[Unit]` — identité et dépendances**
+
+| Ligne | Signification |
+|---|---|
+| `Description=`, `Documentation=` | Texte et lien affichés par `systemctl status` |
+| `After=network-online.target nss-lookup.target docker.socket firewalld.service containerd.service time-set.target` | **Ordre** : démarrer après le réseau, la résolution de noms, le socket, le pare-feu, containerd, l'heure |
+| `Wants=network-online.target containerd.service` | Demande leur démarrage ; s'ils échouent, Docker démarre quand même |
+| `Requires=docker.socket` | **Exige** le socket ; s'il échoue, Docker ne démarre pas |
+| `StartLimitBurst=3`, `StartLimitIntervalSec=60` | Au plus 3 démarrages en 60 s, puis systemd abandonne (anti-boucle) |
+
+**`[Service]` — lancement**
+
+| Ligne | Signification |
+|---|---|
+| `Type=notify` | `dockerd` prévient systemd quand il est prêt (`Daemon has completed initialization`) |
+| `ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock` | Commande lancée ; `-H fd://` = socket transmis par systemd |
+| `ExecReload=/bin/kill -s HUP $MAINPID` | `systemctl reload docker` : signal HUP → relit la configuration sans s'arrêter |
+| `TimeoutStartSec=0` | Pas de délai maximal de démarrage |
+| `Restart=always`, `RestartSec=2` | Relance toujours, après 2 s |
+| `LimitNPROC=infinity`, `LimitCORE=infinity`, `TasksMax=infinity` | Aucune limite de processus, de fichiers *core*, de tâches (sinon le nombre de conteneurs serait plafonné) |
+| `Delegate=yes` | systemd laisse Docker gérer les cgroups de ses conteneurs |
+| `KillMode=process` | À l'arrêt du service, ne tue que `dockerd`, **pas les conteneurs** |
+| `OOMScoreAdjust=-500` | En cas de manque de mémoire, le noyau tue d'autres programmes avant `dockerd` |
+
+**`[Install]`** : `WantedBy=multi-user.target` → `systemctl enable docker` rattache le service au démarrage
+normal (lien `multi-user.target.wants/docker.service` vu à l'installation).
+
+**Lecture sécurité**
+
+| Ligne | À regarder |
+|---|---|
+| `ExecStart … -H fd://` | La plus importante : un `-H tcp://0.0.0.0:2375` ajouté = API ouverte sans authentification |
+| Pas de `User=` | `dockerd` tourne en **root** |
+| `…=infinity` | Aucune limite sur le démon → les limites se posent **par conteneur** (`--memory`, `--cpus`, `--pids-limit`) |
+| `Restart=always` | Bon pour la disponibilité, mais un plantage en boucle se lit dans le journal |
+
+**Ne jamais modifier ce fichier** (écrasé à chaque mise à jour du paquet) : utiliser `sudo systemctl edit docker`
+(fichier de surcharge) ou `/etc/docker/daemon.json`.
+
+### 6.9 `journalctl -u docker.service` : le journal du démon
+
+**À quoi ça sert :** comprendre une panne (Docker ne démarre pas après une erreur dans `daemon.json`), vérifier
+un changement après un `restart`, retracer ce qui s'est passé (image tirée, conteneur arrêté, à quelle heure).
+
+**Séquence de démarrage observée** (deux démarrages : 28/09 21:27:30, PID 7732, à l'installation ; 21:49:11,
+PID 275, après redémarrage de WSL) :
+
+| Message | Étape |
+|---|---|
+| `Starting up` | Démarrage |
+| `OTEL tracing is not configured` | Pas d'export de traces OpenTelemetry (normal) |
+| `CDI directory does not exist, skipping` | Pas de matériel spécial (GPU…) déclaré |
+| `Creating a containerd client address=/run/containerd/containerd.sock` | Connexion à containerd |
+| `Loading containers: start.` … `done.` | Restauration des conteneurs existants |
+| `Deleting nftables IPv4/IPv6 rules` | Remise à zéro des règles réseau de Docker avant de les recréer |
+| `Docker daemon commit=… storage-driver=overlayfs` | Version et pilote de stockage (couches) |
+| `Initializing buildkit` / `Completed buildkit initialization` | Moteur de build prêt |
+| `Daemon has completed initialization` | Prêt (notifié à systemd) |
+| `API listen on /run/docker.sock` | Écoute sur le socket local |
+
+**Avertissements sans gravité sous WSL2 :** `No blkio throttle…` (pas de limitation du débit disque),
+`failed check for fsverity support` (vérification d'intégrité non proposée par le système de fichiers),
+`cgroup v1 is deprecated` (WSL2 utilise encore l'ancienne version des cgroups).
+
+Options utiles : `-u <unité>`, `-n 50` (dernières lignes), `-f` (suivre en direct), `--since "1 hour ago"`,
+`-p warning` (à partir du niveau warning), `--no-pager`.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -840,6 +913,13 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - containerd (site officiel) — https://containerd.io/
 - runc — https://github.com/opencontainers/runc
 - `systemctl` — https://www.freedesktop.org/software/systemd/man/latest/systemctl.html
+- `systemd.unit` (`After`, `Wants`, `Requires`, `StartLimit…`, `WantedBy`) — https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html
+- `systemd.service` (`Type`, `ExecStart`, `Restart`, `TimeoutStartSec`) — https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
+- `systemd.exec` (`Limit…`, `OOMScoreAdjust`) — https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+- `systemd.resource-control` (`TasksMax`, `Delegate`) — https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html
+- `systemd.kill` (`KillMode`) — https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html
+- Configurer le démon Docker (systemd, `daemon.json`) — https://docs.docker.com/engine/daemon/
+- Lire les logs du démon — https://docs.docker.com/engine/daemon/logs/
 - `systemd.socket` (activation par socket) — https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html
 - `journalctl` — https://www.freedesktop.org/software/systemd/man/latest/journalctl.html
 - Protéger l'accès au démon Docker — https://docs.docker.com/engine/security/protect-access/
