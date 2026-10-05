@@ -1057,6 +1057,32 @@ sudo ls -l /proc/10607/ns                                         #    ses names
 **Colonnes de `docker images` :** `DISK USAGE` = place réelle sur le disque (décompressée) ; `CONTENT SIZE` =
 taille compressée téléchargée ; `EXTRA` `U` = image **u**tilisée par au moins un conteneur.
 
+### 6.15 Rootless et userns-remap : ne pas confondre (et ne pas installer maintenant)
+
+**Deux approches différentes**, souvent mélangées :
+
+| | Classique (le mien) | userns-remap | Rootless |
+|---|---|---|---|
+| `dockerd` tourne en | root | root | **utilisateur ordinaire** |
+| root du conteneur = | vrai root de l'hôte | utilisateur ordinaire (traduit) | utilisateur ordinaire |
+| Mise en place | — | `daemon.json` | `dockerd-rootless-setuptool.sh install` |
+| Protection | faible | moyenne | forte |
+
+**Vérifier si les user namespaces sont actifs :**
+
+```bash
+docker info | grep -i userns      # aucune ligne chez moi → non activé (root conteneur = root hôte)
+```
+
+**⚠️ Pourquoi je n'installe PAS le rootless maintenant (vérifié 2026-10-05) :**
+- Prérequis **manquants** : paquet `uidmap` (fournit `newuidmap`/`newgidmap`) et `slirp4netns` (réseau)
+  → `dockerd-rootless-setuptool.sh install` échouerait sur `newuidmap: command not found`.
+- Le rootless crée un **second Docker séparé** : le conteneur `web`, les images et la config de logs du Docker
+  classique n'y seraient pas visibles.
+- Sujet de la **phase 8**, pas de l'apprentissage de base — à faire plus tard, sur une machine/VM dédiée.
+
+Le jour venu : `sudo apt install uidmap slirp4netns`, puis arrêter le Docker classique avant d'installer le rootless.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -1269,6 +1295,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `docker inspect` (`--format`) — https://docs.docker.com/reference/cli/docker/inspect/
 - Pilote de logs `json-file` (rotation `max-size`, `max-file`) — https://docs.docker.com/engine/logging/drivers/json-file/
 - Mode rootless — https://docs.docker.com/engine/security/rootless/
+- userns-remap (remappage des user namespaces) — https://docs.docker.com/engine/security/userns-remap/
+- `user_namespaces(7)` — https://man7.org/linux/man-pages/man7/user_namespaces.7.html
 - Surface d'attaque du démon Docker (groupe `docker` ≈ root) — https://docs.docker.com/engine/security/#docker-daemon-attack-surface
 - Docker et les pare-feu (contournement d'`ufw`) — https://docs.docker.com/engine/network/packet-filtering-firewalls/
 - Licence Docker Desktop (qui doit payer) — https://docs.docker.com/subscription/desktop-license/
