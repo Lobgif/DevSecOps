@@ -1844,6 +1844,47 @@ macvlan = conteneur avec une vraie IP sur le réseau physique, sans NAT
 
 ---
 
+## 17. Apprendre les réseaux hors Docker — plan et ressources
+
+**Date :** 2026-10-05
+
+### 17.1 Ce que macvlan/ipvlan suppose de connaître
+
+| Notion | Ce que c'est |
+|---|---|
+| Adresse MAC | Identifiant physique d'une carte réseau (couche 2) |
+| L2 / L3 | Couche liaison (MAC, switch) vs couche réseau (IP, routeur) |
+| VLAN | Réseau local virtuel — segmentation L2 |
+| Bridge / switch | Connecte des appareils au niveau MAC |
+| Routage | Décision de vers où envoyer un paquet |
+| NAT | Traduction d'adresse (ce que fait la box) |
+| iptables / nftables | Pare-feu Linux (manipulé automatiquement par Docker) |
+
+### 17.2 ipvlan vs macvlan
+
+| | macvlan | ipvlan |
+|---|---|---|
+| MAC par conteneur | Propre MAC distincte | Partage la MAC de l'hôte |
+| Quand | Réseau qui autorise plusieurs MAC par port | Cloud providers, commutateurs stricts (1 seule MAC autorisée par port) |
+
+Sur une VM cloud (AWS, Oracle, GCP), macvlan échoue souvent car la carte n'accepte qu'une MAC.
+ipvlan L3 fonctionne car il n'en ajoute pas de nouvelle.
+
+### 17.3 Plan d'apprentissage
+
+```
+Maintenant        → Stéphane Robert Docker network (lecture en cours)
+Semaine suivante  → Professor Messer : OSI, IP Addressing, Routing (3-4h)
+Ensuite           → Julia Evans "Networking!" zine (pratique, visuel)
+Ensuite           → iproute2 : pratiquer ip link, ip route, ip addr
+Ensuite           → Revenir à macvlan/ipvlan : tout sera clair
+```
+
+Pour FleetTrack : bridge + overlay (Swarm) suffisent. Le reste est de la culture réseau
+utile pour comprendre les pare-feux, load balancers et CNI Kubernetes.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1999,6 +2040,13 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Spécification OCI : index d'image (multi-architecture) — https://github.com/opencontainers/image-spec/blob/main/image-index.md
 - Plugin asdf utilisé pour jq (communautaire) — https://github.com/lsanwick/asdf-jq
 - Plugin asdf utilisé pour crane (communautaire) — https://github.com/dmpe/asdf-crane
+
+### Apprendre les réseaux (hors Docker)
+- Professor Messer Network+ (vidéos gratuites, OSI, IP, routage, switching) — https://www.professormesser.com/network-plus/n10-008/n10-008-video/n10-008-training-course/
+- Julia Evans "Networking!" zine (pratique, Linux) — https://wizardzines.com/zines/networking/
+- iproute2 par exemple (`ip link`, `ip route`, `ip addr`) — https://baturin.org/docs/iproute2/
+- nftables wiki (pare-feu Linux, remplace iptables) — https://wiki.nftables.org/wiki-nftables/index.php/Main_Page
+- Stéphane Robert — réseau Docker (bridge, overlay, macvlan, ipvlan, host, none) — https://blog.stephane-robert.info/docs/conteneurs/moteurs-conteneurs/docker/network/
 
 ### Réseau macvlan
 - Pilote macvlan — https://docs.docker.com/engine/network/drivers/macvlan/
