@@ -1029,6 +1029,34 @@ Desktop** (abonnement payant), absente de Docker Engine.
 Le second cas applique directement les namespaces (6.1) : un conteneur d'outils « entre » dans les namespaces
 d'un autre.
 
+### 6.14 `exec: "ps": executable file not found` — voir les processus d'un conteneur minimal
+
+**Erreur rencontrée (2026-10-05) :** `docker exec web ps aux` →
+`OCI runtime exec failed: … exec: "ps": executable file not found in $PATH`.
+
+**Pourquoi :** l'image `nginx:1.25` ne contient pas `ps`. Les images officielles sont réduites au minimum
+(moins de programmes = moins de failles, image plus légère). `docker exec` ne lance que ce qui **existe dans
+le conteneur**.
+
+```bash
+docker top web                                                    # 1. processus lus depuis l'hôte
+docker run --rm --pid=container:web nicolaka/netshoot ps aux      # 2. conteneur d'outils dans le même namespace PID
+docker inspect --format '{{.State.Pid}}' web                      # 3. PID côté hôte (→ 10607 chez moi)
+ps -fp 10607                                                      #    détail de ce processus sur l'hôte
+sudo ls -l /proc/10607/ns                                         #    ses namespaces (pid, net, mnt, uts, ipc…)
+```
+
+| Élément | Rôle |
+|---|---|
+| `docker top <conteneur>` | Liste les processus du conteneur sans rien exécuter dedans |
+| `.State.Pid` | PID du processus principal **vu de l'hôte** ; dans le conteneur, c'est le **PID 1** (namespace PID) |
+| `ps -f -p <pid>` | `-p` = ce processus seulement ; `-f` = format complet |
+| `/proc/<pid>/ns` | Un lien par namespace auquel appartient le processus |
+| `nicolaka/netshoot` | Image communautaire remplie d'outils de diagnostic (898 Mo) — pour dépanner, jamais comme base d'application |
+
+**Colonnes de `docker images` :** `DISK USAGE` = place réelle sur le disque (décompressée) ; `CONTENT SIZE` =
+taille compressée téléchargée ; `EXTRA` `U` = image **u**tilisée par au moins un conteneur.
+
 **À retenir :**
 1. Une image ne change jamais ; un conteneur est jetable.
 2. Tout ce qui doit survivre va dans un **volume**.
@@ -1296,6 +1324,10 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Kubernetes et le swap — https://kubernetes.io/docs/concepts/cluster-administration/swap-memory-management/
 - `docker debug` (Docker Desktop uniquement) — https://docs.docker.com/reference/cli/docker/debug/
 - `docker exec` — https://docs.docker.com/reference/cli/docker/container/exec/
+- `docker top` — https://docs.docker.com/reference/cli/docker/container/top/
+- `docker image ls` — https://docs.docker.com/reference/cli/docker/image/ls/
+- netshoot (image d'outils réseau, communautaire) — https://github.com/nicolaka/netshoot
+- `proc(5)` (`/proc/<pid>/ns`) — https://man7.org/linux/man-pages/man5/proc.5.html
 - `docker diff` — https://docs.docker.com/reference/cli/docker/container/diff/
 - `docker stats` — https://docs.docker.com/reference/cli/docker/container/stats/
 - `namespaces(7)` — https://man7.org/linux/man-pages/man7/namespaces.7.html
