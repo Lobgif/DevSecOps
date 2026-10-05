@@ -1294,12 +1294,204 @@ docker rm lent rapide
 
 ---
 
+## 11. User namespaces — opt-in, feature gates et Kubernetes
+
+**Date :** 2026-10-05 (lecture du guide)
+
+### 11.1 L'opt-in expliqué
+
+| Terme | Ce que ça veut dire |
+|---|---|
+| **Alpha** | Expérimental, peut être retiré sans préavis |
+| **Beta** | Prêt à tester, mais l'API peut encore changer ; pas garanti stable |
+| **Feature gate** | Un interrupteur dans Kubernetes (flag à passer à `kube-apiserver`, `kubelet`…) à activer manuellement pour débloquer une fonction expérimentale |
+| **Activé par défaut** | Depuis v1.33, le feature gate `UserNamespacesSupport` est `true` sans rien faire |
+| **Opt-in au niveau du pod** | Même si la fonction est disponible, **chaque pod doit l'activer** dans sa spec |
+
+Le pod doit écrire dans son YAML :
+```yaml
+spec:
+  hostUsers: false   # false = activer le user namespace pour ce pod
+```
+Sans cette ligne : comportement classique, root dans le conteneur = UID 0 sur le nœud.
+
+### 11.2 Cgroups v1 vs v2 — ce qui change concrètement
+
+**v1 = une hiérarchie par contrôleur.** CPU, mémoire, blkio (I/O disque) : chacun a son propre arbre séparé.
+Un processus peut figurer dans plusieurs arbres en même temps, parfois de façon incohérente.
+
+**v2 = un seul arbre unifié.** Tout est cohérent, et ça ouvre des fonctions nouvelles, notamment les métriques
+PSI (*Pressure Stall Information*) : Docker peut dire « ce conteneur a manqué de mémoire pendant 200 ms cette
+minute », pas juste « il utilise 512 Mo ».
+
+| | v1 (ma machine) | v2 |
+|---|---|---|
+| `--memory-swap` | ✅ | ✅ |
+| Limitation débit disque (`blkio throttle`) | ❌ non supporté dans WSL2 (les 4 warnings de `docker info`) | ✅ |
+| Métriques mémoire PSI | ❌ approximatives | ✅ précises |
+| Kubernetes 1.25+ | Mode maintenance | Standard recommandé |
+
+### 11.3 Pourquoi ma machine montre les deux
+
+`mount | grep cgroup` montre cgroup v1 **et** v2 en même temps → mode **hybride** du noyau WSL2 :
+- `cgroup2 on /sys/fs/cgroup/unified` → le noyau supporte v2
+- `cgroup on /sys/fs/cgroup/memory` etc. → il monte quand même v1 en parallèle
+
+`docker info` indique `Cgroup Version: 1` → `dockerd` utilise v1, malgré la disponibilité de v2.
+Les 4 avertissements dans `docker info` indiquent que la migration vers v2 sera obligatoire (avant mai 2029).
+
+**À faire sur ma machine :** rien. La migration v2 se fait au niveau du noyau et du démon. C'est un sujet de
+production, pas d'apprentissage maintenant.
+
+---
+
+## 12. Seccomp — profils et filtrage des syscalls
+
+**Date :** 2026-10-05 (lecture du guide)
+
+### 12.1 Structure d'un profil personnalisé
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    { "names": ["read", "write", "exit", "exit_group"], "action": "SCMP_ACT_ALLOW" }
+  ]
+}
+```
+
+| Champ | Rôle |
+|---|---|
+| `defaultAction: SCMP_ACT_ERRNO` | Tout syscall non listé est **refusé** — renvoie une erreur au processus |
+| `SCMP_ACT_ALLOW` | Le syscall est autorisé |
+| `SCMP_ACT_KILL` | Le processus est tué immédiatement (sans signal) |
+| `architectures` | Limiter à une ou plusieurs ABI (x86_64, ARM64…) |
+
+Ce profil ultra-restrictif est un exemple. En production, le profil par défaut de Docker (`moby/moby`)
+autorise ~300 syscalls et en bloque une quarantaine.
+
+### 12.2 Les syscalls bloqués par défaut — pourquoi
+
+| Syscall | Ce qu'il fait | Pourquoi bloqué |
+|---|---|---|
+| `reboot` | Redémarre la machine | Inutile dans un conteneur ; dangereux |
+| `mount` / `umount` | Monte / démonte des systèmes de fichiers | Permettrait d'échapper à l'isolation |
+| `ptrace` | Surveille/contrôle un autre processus | Permet de lire ou modifier la mémoire d'autres processus |
+| `clock_settime` | Change l'heure système | Affecte toute la machine |
+| `kexec_load` | Charge un nouveau noyau | Remplacement de l'OS en cours d'exécution |
+| `bpf` | Charge des programmes eBPF | Peut surveiller ou modifier tous les processus |
+| `add_key` / `keyctl` | Gère le trousseau de clés du noyau | Accès aux secrets d'autres processus |
+| `acct` | Active la comptabilité BSD des processus | Accès fichier root-only |
+| `pivot_root` | Change la racine du système de fichiers | Sortie potentielle de l'isolation |
+| `swapon` / `swapoff` | Active/désactive le swap | Affecte la machine entière |
+
+### 12.3 Appliquer un profil personnalisé
+
+```bash
+docker run --security-opt seccomp=/chemin/vers/profil.json nginx
+```
+
+Pour désactiver complètement seccomp (⚠️ ne pas faire en prod) :
+```bash
+docker run --security-opt seccomp=unconfined nginx
+```
+
+---
+
+## 13. Réseau Docker — bridge, NAT et isolation
+
+**Date :** 2026-10-05 (lecture du guide)
+
+### 13.1 Ce qui se passe par défaut
+
+```
+docker run nginx    # sans --network = réseau bridge par défaut
+```
+
+Docker branche le conteneur sur un réseau virtuel interne appelé **bridge** (`docker0`). Par défaut :
+1. **Tous** les conteneurs sur ce bridge se voient **entre eux par adresse IP** (172.17.0.x)
+2. Ils peuvent sortir vers Internet grâce à une règle **NAT** (comme ta box Internet pour tes appareils)
+3. Aucun port n'est ouvert vers l'extérieur, sauf si on passe `-p host:conteneur`
+
+### 13.2 Exemple concret — deux conteneurs qui se voient
+
+```bash
+# Lancer deux conteneurs sur le bridge par défaut
+docker run -d --name serveur nginx
+docker run -d --name client  alpine sleep 1000
+
+# Trouver l'IP du serveur
+docker inspect --format '{{.NetworkSettings.IPAddress}}' serveur
+# → 172.17.0.2
+
+# Depuis client, accéder au serveur par IP (aucun port publié, pourtant ça marche)
+docker exec client wget -qO- http://172.17.0.2
+# → la page d'accueil de nginx s'affiche
+```
+
+Résultat : deux conteneurs sans aucun lien configuré, mais ils se parlent directement par IP.
+Si mon API et ma base de données sont sur le bridge par défaut, n'importe quel autre conteneur
+peut **attaquer la base par IP**.
+
+### 13.3 Contre-exemple — réseaux séparés
+
+```bash
+docker network create reseau_a
+docker network create reseau_b
+docker run -d --name serveur --network reseau_a nginx
+docker run -d --name client  --network reseau_b alpine sleep 1000
+
+docker exec client wget -qO- http://172.18.0.2
+# → connexion refusée : les deux réseaux sont isolés
+```
+
+### 13.4 Contre-exemple — couper l'accès Internet
+
+```bash
+docker run --rm --network none alpine curl https://example.com
+# → Network unreachable : aucune carte réseau, aucun accès
+```
+
+### 13.5 Bonne pratique
+
+Créer un réseau dédié par application, n'y placer que les conteneurs qui doivent se parler :
+
+```bash
+docker network create fleettrack_network
+docker run -d --name api --network fleettrack_network mon_api
+docker run -d --name db  --network fleettrack_network postgres
+# → api peut joindre db par nom (DNS interne Docker) ; aucun autre conteneur ne peut les joindre
+```
+
+Dans Docker Compose, chaque `docker-compose.yml` crée un réseau dédié automatiquement → les
+conteneurs d'un projet ne voient pas ceux d'un autre projet.
+
+### 13.6 NAT et sortie vers Internet
+
+Docker ajoute une règle **iptables/nftables** sur l'hôte : tout trafic sortant d'un conteneur est
+traduit vers l'IP de la machine (MASQUERADE). C'est pour ça qu'un conteneur peut faire
+`curl https://example.com` sans aucune configuration supplémentaire.
+
+Corollaire de sécurité : si un conteneur est compromis, il peut contacter l'extérieur (exfiltration,
+téléchargement de code malveillant). Pour bloquer la sortie : `--network none`, ou des règles
+iptables avancées (`--icc=false`, politiques sortantes).
+
+### 13.7 Nettoyage des conteneurs de test
+
+```bash
+docker rm -f serveur client
+docker network rm reseau_a reseau_b
+```
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
 
-Documentations officielles, plus le guide de Stéphane Robert (signalé à part). Vérifiées les 2026-09-28 et
-2026-10-03 (chaque URL répond).
+Documentations officielles, plus le guide de Stéphane Robert (signalé à part). Vérifiées les 2026-09-28,
+2026-10-03 et 2026-10-05 (chaque URL répond).
 
 ### Guide suivi — Stéphane Robert (non officiel, fil conducteur de l'apprentissage)
 - Conteneurs — https://blog.stephane-robert.info/docs/conteneurs/
@@ -1449,6 +1641,19 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Spécification OCI : index d'image (multi-architecture) — https://github.com/opencontainers/image-spec/blob/main/image-index.md
 - Plugin asdf utilisé pour jq (communautaire) — https://github.com/lsanwick/asdf-jq
 - Plugin asdf utilisé pour crane (communautaire) — https://github.com/dmpe/asdf-crane
+
+### Réseau Docker
+- Vue d'ensemble des réseaux Docker — https://docs.docker.com/engine/network/
+- Pilote bridge (réseau bridge, NAT, DNS interne) — https://docs.docker.com/engine/network/drivers/bridge/
+- `docker network create` — https://docs.docker.com/reference/cli/docker/network/create/
+- Filtrage de paquets et pare-feu (iptables/nftables, MASQUERADE) — https://docs.docker.com/engine/network/packet-filtering-firewalls/
+
+### Cgroups v1 / v2
+- Documentation du noyau Linux — cgroup v2 — https://docs.kernel.org/admin-guide/cgroup-v2.html
+- cgroups(7) — https://man7.org/linux/man-pages/man7/cgroups.7.html
+
+### Kubernetes — user namespaces
+- User namespaces dans les pods — https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/
 
 ### Commandes shell
 - `curl` (`-L`, `-O`, `-s`) — https://curl.se/docs/manpage.html
