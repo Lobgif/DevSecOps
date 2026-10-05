@@ -1616,6 +1616,159 @@ bloc disponible dans `172.16.0.0/12` → `172.18.0.0/16`, `172.19.0.0/16`, etc.
 
 ---
 
+## 15. Docker standalone vs Docker Swarm — toutes les différences
+
+**Date :** 2026-10-05 (lecture + comparaison)
+
+### 15.1 La différence fondamentale
+
+| | Docker standalone | Docker Swarm |
+|---|---|---|
+| **Quoi** | Un seul moteur sur une seule machine | Plusieurs machines (nœuds) = cluster |
+| **Qui décide** | Toi, à la main | Le **manager** Swarm (orchestrateur) |
+| **Unité de base** | Le conteneur | Le **service** |
+| **Résilience** | Si le conteneur meurt, il est mort | Swarm en recrée un automatiquement |
+
+### 15.2 Conteneur vs Task vs Service
+
+```
+Service  = la définition (« je veux 3 nginx »)
+Task     = une instance du service = un conteneur en cours d'exécution
+Conteneur = ce que runc exécute réellement
+
+docker service create --name web --replicas 3 nginx
+→ 1 service  "web"
+→ 3 tasks    "web.1", "web.2", "web.3"
+→ 3 conteneurs, un par nœud disponible
+```
+
+| Commande standalone | Équivalent Swarm |
+|---|---|
+| `docker ps` | `docker service ps web` |
+| `docker run` | `docker service create` |
+| `docker stop` | `docker service rm` |
+| `docker logs mon_conteneur` | `docker service logs web` |
+| `docker inspect` | `docker service inspect web` |
+
+### 15.3 Image — identique, mais doit être dans un registre
+
+L'image est la même. Ce qui change : chaque nœud doit pouvoir la télécharger.
+
+**Contre-exemple :** `docker build` local crée une image **uniquement sur ta machine**. Les
+autres nœuds ne l'ont pas. Il faut la pousser dans un registre avant de la déployer en Swarm.
+
+### 15.4 Réseau — bridge local vs overlay distribué
+
+| | bridge (standalone) | overlay (Swarm) |
+|---|---|---|
+| Portée | Une seule machine | Tous les nœuds du cluster |
+| Technologie | Pont virtuel Linux | VXLAN : encapsule les paquets dans UDP/4789 |
+| DNS interne | Par nom de conteneur | Par **nom de service** |
+| Chiffrement | Non | Optionnel (`--opt encrypted`) |
+
+```bash
+docker network create --driver overlay mon_overlay
+# Les services se joignent par nom de service :
+# dans "api", "db" résout vers l'IP virtuelle (VIP) de "db"
+# → Swarm fait le load balancing entre les tasks automatiquement
+```
+
+**Réseau ingress (automatique) :** quand on publie un port (`-p 80:80`), n'importe quel nœud
+du cluster peut recevoir le trafic, même sans task locale → **routing mesh**.
+```
+Utilisateur → nœud 3 (port 80) → Swarm redirige vers nœud 1 (qui a la task)
+```
+
+### 15.5 Volume — le piège principal de Swarm
+
+Un volume `driver: local` reste **sur le nœud courant**. Si la task migre, le volume ne suit pas.
+
+| Solution | Principe |
+|---|---|
+| NFS | Dossier réseau monté sur tous les nœuds |
+| Pilote distribué (Longhorn, Portworx) | Plugin Docker qui synchronise |
+| Serveur externe | Base de données hors Swarm, les tasks s'y connectent |
+
+**Contre-exemple critique :** PostgreSQL en Swarm avec `--replicas 2` et volume local → deux
+instances écrivent chacune dans leur propre volume → **corruption de données garantie**.
+PostgreSQL n'est pas conçu pour s'exécuter en deux instances sur deux volumes différents.
+
+### 15.6 Stack — l'équivalent Swarm de docker compose up
+
+| | Docker Compose | Docker Stack |
+|---|---|---|
+| Commande | `docker compose up` | `docker stack deploy -c fichier.yml mon_stack` |
+| État | Conteneurs sur une machine | Services distribués sur le cluster |
+| Mise à jour | Downtime | Rolling update (zéro downtime) |
+
+Section `deploy:` dans le compose : ignorée par `docker compose`, utilisée par Swarm :
+
+```yaml
+services:
+  web:
+    image: nginx
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1          # mettre à jour 1 replica à la fois
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == worker # ne pas déployer sur le manager
+```
+
+### 15.7 Nœuds — concept absent en standalone
+
+| Rôle | Fonction |
+|---|---|
+| **Manager** | Prend les décisions, maintient l'état (Raft consensus), peut exécuter des tasks |
+| **Worker** | Exécute les tasks, ne prend pas de décisions |
+
+```bash
+docker node ls
+docker node update --availability drain mon_noeud   # vider un nœud pour maintenance
+```
+
+Pour la HA : **au moins 3 managers** (quorum Raft : tolère 1 panne). Avec 1 seul manager,
+si il tombe, le cluster est en lecture seule.
+
+### 15.8 Secrets et configs — spécifiques à Swarm
+
+```bash
+# Secret : données sensibles
+echo "mot_de_passe" | docker secret create db_password -
+docker service create --secret db_password postgres
+# → monté en lecture seule dans /run/secrets/db_password dans le conteneur
+```
+
+En standalone, les secrets passent par `-e` (variable d'environnement) → visible dans
+`docker inspect` et les logs du démon. Pas sécurisé.
+
+```bash
+# Config : fichier de configuration
+docker config create nginx_conf ./nginx.conf
+docker service create --config nginx_conf nginx
+```
+
+### 15.9 Résumé en tableau
+
+| Élément | Standalone | Swarm |
+|---|---|---|
+| Unité déployée | `container` | `service` → `tasks` |
+| Commande déploiement | `docker run` | `docker service create` |
+| Fichier config | `docker compose up` | `docker stack deploy` |
+| Réseau | `bridge` (local) | `overlay` (cross-nœuds) |
+| Volume | Local à la machine | Doit être partagé (NFS/plugin) |
+| Secrets | Variable d'environnement | `docker secret` (chiffré, monté) |
+| Ports | Publiés sur l'hôte | Routing mesh (n'importe quel nœud répond) |
+| Résilience | Manuelle | Automatique |
+| Mise à jour | Downtime | Rolling update (zéro downtime) |
+| Nœuds | Aucune notion | Managers + Workers |
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1771,6 +1924,18 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Spécification OCI : index d'image (multi-architecture) — https://github.com/opencontainers/image-spec/blob/main/image-index.md
 - Plugin asdf utilisé pour jq (communautaire) — https://github.com/lsanwick/asdf-jq
 - Plugin asdf utilisé pour crane (communautaire) — https://github.com/dmpe/asdf-crane
+
+### Docker Swarm
+- Vue d'ensemble Swarm — https://docs.docker.com/engine/swarm/
+- Démarrer avec Swarm (tutorial officiel) — https://docs.docker.com/engine/swarm/swarm-tutorial/
+- `docker service create` — https://docs.docker.com/reference/cli/docker/service/create/
+- `docker stack deploy` — https://docs.docker.com/reference/cli/docker/stack/deploy/
+- Réseau overlay Swarm — https://docs.docker.com/engine/network/drivers/overlay/
+- Routing mesh (ingress) — https://docs.docker.com/engine/swarm/ingress/
+- Secrets Swarm — https://docs.docker.com/engine/swarm/secrets/
+- Configs Swarm — https://docs.docker.com/engine/swarm/configs/
+- Nœuds (managers/workers, Raft) — https://docs.docker.com/engine/swarm/how-swarm-mode-works/nodes/
+- Rolling updates — https://docs.docker.com/engine/swarm/swarm-tutorial/rolling-update/
 
 ### Protocoles réseau & adressage IP
 - IPv4 (RFC 791) — https://datatracker.ietf.org/doc/html/rfc791
