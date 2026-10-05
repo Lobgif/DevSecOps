@@ -1769,6 +1769,81 @@ docker service create --config nginx_conf nginx
 
 ---
 
+## 16. Réseau macvlan — conteneur avec une vraie IP sur le réseau physique
+
+**Date :** 2026-10-05 (lecture + comparaison)
+
+### 16.1 Le problème que macvlan résout
+
+Tous les réseaux Docker vus jusqu'ici utilisent du **NAT** : le conteneur a une IP privée
+(`172.17.0.x`) masquée derrière l'IP de la machine hôte.
+
+Avec **macvlan**, le conteneur a une **vraie IP du réseau local** et une **vraie adresse MAC**.
+Les autres appareils (box, serveurs) le voient comme un appareil physique indépendant.
+
+```
+Sans macvlan : Conteneur (172.17.0.2) → NAT → Hôte (192.168.1.10) → Réseau
+Avec macvlan : Conteneur (192.168.1.50, MAC propre)                → Réseau directement
+```
+
+### 16.2 D'où viennent subnet, parent, gateway
+
+`ip -br link` et `ip route` donnent les valeurs à copier.
+
+```bash
+ip -br link
+# eth0  UP  52:54:00:ab:cd:ef   ← la carte réseau → valeur de --opt parent
+
+ip route
+# default via 192.168.1.1 dev eth0   ← box/routeur → valeur de --gateway
+# 192.168.1.0/24 dev eth0            ← réseau local → valeur de --subnet
+```
+
+```bash
+docker network create \
+  --driver macvlan \
+  --subnet 192.168.1.0/24 \
+  --gateway 192.168.1.1 \
+  --opt parent=eth0 \
+  mon_macvlan
+
+docker run --rm --network mon_macvlan --ip 192.168.1.50 nginx
+# → nginx visible sur 192.168.1.50 depuis tout le réseau local
+```
+
+### 16.3 Quand l'utiliser (et quand ne pas l'utiliser)
+
+| Cas utile | Cas inutile |
+|---|---|
+| Appliance réseau (firewall, routeur) dans un conteneur | API web → bridge + `-p 80:80` |
+| Système legacy qui attend une IP fixe du réseau physique | Base de données → réseau interne |
+| Pi-hole, AdGuard (domotique / home lab) | Stack applicatif complet → Compose |
+| Monitoring SNMP | **FleetTrack → pas de macvlan** |
+
+### 16.4 Limitation sur WSL2
+
+Macvlan exige de mettre la carte en **mode promiscuous**. Hyper-V bloque ça sur ses
+adaptateurs virtuels → macvlan ne fonctionne pas correctement dans WSL2.
+
+**Contre-exemple :** la création du réseau ne donne pas d'erreur, mais les paquets ne
+sortent pas de WSL2 vers le réseau physique. Pour tester macvlan, il faut une VM
+VirtualBox avec adaptateur en mode **Bridged/Promiscuous**, ou une vraie VM cloud.
+
+### 16.5 À retenir
+
+```
+ip -br link  → nom de la carte (eth0, ens3…)  → "parent"
+ip route     → ton réseau (192.168.1.0/24)    → "subnet"
+             → ta box (192.168.1.1)            → "gateway"
+
+macvlan = conteneur avec une vraie IP sur le réseau physique, sans NAT
+→ cas spécifiques (appliances, legacy, home lab)
+→ pas utile pour FleetTrack
+→ ne fonctionne pas dans WSL2 sans config Hyper-V
+```
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1924,6 +1999,11 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Spécification OCI : index d'image (multi-architecture) — https://github.com/opencontainers/image-spec/blob/main/image-index.md
 - Plugin asdf utilisé pour jq (communautaire) — https://github.com/lsanwick/asdf-jq
 - Plugin asdf utilisé pour crane (communautaire) — https://github.com/dmpe/asdf-crane
+
+### Réseau macvlan
+- Pilote macvlan — https://docs.docker.com/engine/network/drivers/macvlan/
+- `ip-route(8)` — https://man7.org/linux/man-pages/man8/ip-route.8.html
+- `ip-link(8)` — https://man7.org/linux/man-pages/man8/ip-link.8.html
 
 ### Docker Swarm
 - Vue d'ensemble Swarm — https://docs.docker.com/engine/swarm/
