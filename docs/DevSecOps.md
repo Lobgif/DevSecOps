@@ -1486,6 +1486,136 @@ docker network rm reseau_a reseau_b
 
 ---
 
+## 14. Protocoles réseau, adressage IP et calculs de sous-réseaux
+
+**Date :** 2026-10-05 (lecture + exercices)
+
+### 14.1 TCP vs UDP
+
+| | TCP | UDP |
+|---|---|---|
+| Connexion | Oui (handshake 3 voies) | Non |
+| Fiabilité | Garantit livraison et ordre | Envoie et oublie |
+| Vitesse | Plus lent (accusés de réception) | Plus rapide |
+| Usage | HTTP, SSH, base de données | DNS, vidéo, VXLAN overlay |
+
+**Handshake TCP :**
+```
+Client → Serveur : SYN        (« je veux me connecter »)
+Serveur → Client : SYN-ACK    (« ok, je t'entends »)
+Client → Serveur : ACK        (« parfait, on commence »)
+```
+Toute donnée perdue est retransmise automatiquement.
+
+**Contre-exemple UDP :** un appel vidéo. Si un paquet est perdu, l'image pixelise une
+fraction de seconde. Mieux vaut perdre un paquet que d'attendre sa retransmission et figer
+l'image pendant 300 ms.
+
+### 14.2 Ports Docker Swarm — pourquoi TCP *et* UDP pour 7946
+
+| Port | Proto | Rôle |
+|---|---|---|
+| 2377/TCP | TCP | Gestion du cluster (ordres orchestrateur → nœuds) — fiabilité requise |
+| 7946/TCP | TCP | Découverte fiable (liste des membres) |
+| 7946/UDP | UDP | Gossip rapide (est-il encore en vie ?) |
+| 4789/UDP | UDP | Trafic overlay VXLAN (paquets conteneurs encapsulés) — volume élevé, latence faible |
+
+### 14.3 Adressage IPv4 — structure
+
+Une adresse IPv4 = **32 bits**, écrite en 4 octets décimaux (0–255) séparés par des points.
+
+```
+192   .  168  .   1  .  42
+11000000.10101000.00000001.00101010
+```
+
+**Plages privées (RFC 1918) — jamais routées sur Internet :**
+
+| Plage | CIDR | Usage typique |
+|---|---|---|
+| 10.0.0.0 → 10.255.255.255 | 10.0.0.0/8 | Réseaux d'entreprise |
+| 172.16.0.0 → 172.31.255.255 | 172.16.0.0/12 | Docker (172.17.x.x, 172.18.x.x…) |
+| 192.168.0.0 → 192.168.255.255 | 192.168.0.0/16 | Box domestique |
+
+**Contre-exemple :** `8.8.8.8` est publique (DNS Google). Si tu la mets dans un fichier de
+config comme IP locale, les paquets partent sur Internet — le noyau ne la traite jamais comme
+locale.
+
+### 14.4 Notation CIDR et calculs
+
+`/N` = les N premiers bits identifient le réseau. Les `32 − N` bits restants identifient les hôtes.
+
+**Formule :**
+- Adresses totales = **2^(32−N)**
+- Hôtes utilisables = **2^(32−N) − 2** (−1 adresse réseau, −1 broadcast)
+
+| CIDR | Masque | Adresses | Hôtes utilisables |
+|---|---|---|---|
+| /8 | 255.0.0.0 | 16 777 216 | 16 777 214 |
+| /16 | 255.255.0.0 | 65 536 | 65 534 |
+| /24 | 255.255.255.0 | 256 | **254** |
+| /25 | 255.255.255.128 | 128 | 126 |
+| /26 | 255.255.255.192 | 64 | 62 |
+| /28 | 255.255.255.240 | 16 | 14 |
+| /30 | 255.255.255.252 | 4 | **2** (liaison point à point) |
+| /32 | 255.255.255.255 | 1 | 0 (une seule adresse, une interface) |
+
+### 14.5 Calcul pas à pas — 192.168.10.0/26
+
+```
+/26 → 32 − 26 = 6 bits pour les hôtes
+2^6 = 64 adresses
+
+Adresse réseau    : 192.168.10.0   (bits hôtes = 000000)
+Broadcast         : 192.168.10.63  (bits hôtes = 111111)
+Plage utilisable  : 192.168.10.1 → 192.168.10.62  (62 hôtes)
+```
+
+**Découper 192.168.10.0/24 en 4 sous-réseaux /26 égaux :**
+
+| Sous-réseau | Réseau | Plage hôtes | Broadcast |
+|---|---|---|---|
+| #1 | 192.168.10.0 | .1 → .62 | .63 |
+| #2 | 192.168.10.64 | .65 → .126 | .127 |
+| #3 | 192.168.10.128 | .129 → .190 | .191 |
+| #4 | 192.168.10.192 | .193 → .254 | .255 |
+
+**Contre-exemple :** `192.168.10.63` n'est **pas** un hôte — c'est le broadcast du sous-réseau #1.
+Un paquet envoyé à cette adresse est reçu par **tous** les hôtes du réseau.
+
+### 14.6 Protocoles applicatifs courants
+
+| Protocole | Port | TCP/UDP | Rôle |
+|---|---|---|---|
+| SSH | 22 | TCP | Accès shell sécurisé |
+| DNS | 53 | UDP (TCP si > 512 octets) | Résolution de noms |
+| HTTP | 80 | TCP | Web non chiffré |
+| HTTPS | 443 | TCP | Web chiffré (TLS) |
+| PostgreSQL | 5432 | TCP | Base de données |
+| Redis | 6379 | TCP | Cache |
+| ICMP | — | ni TCP ni UDP | Ping, traceroute (messages de contrôle) |
+
+**Contre-exemple DNS :** DNS utilise UDP par défaut. Si la réponse dépasse 512 octets, le client
+refait la requête en TCP. Si le pare-feu bloque TCP/53, certaines résolutions DNS échouent
+silencieusement — piège classique de configuration.
+
+### 14.7 Ce que ça donne dans Docker
+
+```bash
+docker network inspect bridge
+# "Subnet": "172.17.0.0/16"
+# "Gateway": "172.17.0.1"   ← l'hôte, pont vers l'extérieur
+```
+
+- `172.17.0.1` = la passerelle (l'hôte Docker)
+- `172.17.0.2`, `172.17.0.3`… = les conteneurs
+- `/16` → 65 534 conteneurs max théoriques sur ce réseau
+
+Quand on crée un réseau custom (`docker network create fleettrack`), Docker prend le prochain
+bloc disponible dans `172.16.0.0/12` → `172.18.0.0/16`, `172.19.0.0/16`, etc.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -1641,6 +1771,16 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Spécification OCI : index d'image (multi-architecture) — https://github.com/opencontainers/image-spec/blob/main/image-index.md
 - Plugin asdf utilisé pour jq (communautaire) — https://github.com/lsanwick/asdf-jq
 - Plugin asdf utilisé pour crane (communautaire) — https://github.com/dmpe/asdf-crane
+
+### Protocoles réseau & adressage IP
+- IPv4 (RFC 791) — https://datatracker.ietf.org/doc/html/rfc791
+- TCP (RFC 793) — https://datatracker.ietf.org/doc/html/rfc793
+- UDP (RFC 768) — https://datatracker.ietf.org/doc/html/rfc768
+- Adresses IP privées (RFC 1918) — https://datatracker.ietf.org/doc/html/rfc1918
+- CIDR (RFC 4632) — https://datatracker.ietf.org/doc/html/rfc4632
+- Numéros de ports officiels (IANA) — https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml
+- `ip(7)` — https://man7.org/linux/man-pages/man7/ip.7.html
+- Ports Docker Swarm requis — https://docs.docker.com/engine/swarm/swarm-tutorial/
 
 ### Réseau Docker
 - Vue d'ensemble des réseaux Docker — https://docs.docker.com/engine/network/
