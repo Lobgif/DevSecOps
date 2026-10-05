@@ -1081,6 +1081,29 @@ docker info | grep -i userns      # aucune ligne chez moi → non activé (root 
   classique n'y seraient pas visibles.
 - Sujet de la **phase 8**, pas de l'apprentissage de base — à faire plus tard, sur une machine/VM dédiée.
 
+**À quoi servent les user namespaces, et pourquoi rootless / userns-remap**
+
+Problème de base : par défaut, **root dans le conteneur = root réel de l'hôte** (prouvé en 6.10). Invisible
+tant que tout va bien ; dangereux dans deux cas :
+- **évasion de conteneur** (une faille permet de « sortir ») → l'attaquant est root sur toute la machine ;
+- **image piégée** téléchargée depuis Internet, dont le code root agit via un volume monté.
+
+Question résolue : « si le conteneur s'échappe ou si l'image est piégée, l'attaquant devient-il root sur ma
+machine ? »
+
+Un **user namespace** traduit les utilisateurs : root du conteneur (0) → utilisateur **ordinaire** de l'hôte
+(ex. 100000). C'est ce que décrit `/etc/subuid` (`lahigic:100000:65536` = UID 0–65535 du conteneur →
+100000–165535 sur l'hôte). Dans le conteneur, le programme se croit root ; sur l'hôte, il n'a aucun privilège.
+Analogie : un faux coffre de banque — même « réussir » le braquage ne vole rien de réel.
+
+Buts concrets : serveur **partagé** (empêcher une prise de contrôle totale via Docker) ; secteur **réglementé**
+(banque/santé exigent souvent que rien ne tourne en root — case d'audit) ; **moindre privilège** (fil rouge du
+DevSecOps : une app web n'a aucune raison d'être root sur l'hôte).
+
+Nuance entre les deux : **userns-remap** protège les conteneurs mais `dockerd` reste root (faille de `dockerd`
+= problème entier) ; **rootless** fait tout tourner sans root, y compris `dockerd` (protection maximale, au
+prix de limites : ports < 1024, overlay…).
+
 Le jour venu : `sudo apt install uidmap slirp4netns`, puis arrêter le Docker classique avant d'installer le rootless.
 
 **À retenir :**
