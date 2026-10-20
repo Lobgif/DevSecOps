@@ -1941,7 +1941,33 @@ Partager un volume ≠ partager n'importe quelle donnée.
 **Règle :** le volume partagé sert aux données « plates » (fichiers). Les données
 transactionnelles (DB) se répliquent au niveau applicatif, pas au niveau stockage.
 
-### 18.5 Équivalent Kubernetes
+### 18.5 Préparer un export NFS — pourquoi `chown 65534`
+
+```bash
+sudo mkdir -p /srv/nfs/partage /srv/nfs/projets   # -p : crée aussi les dossiers parents
+sudo chown 65534:65534 /srv/nfs/partage /srv/nfs/projets
+```
+
+`65534` = l'utilisateur **`nobody`** (groupe `nogroup`), l'identité « anonyme » Linux.
+
+**Pourquoi.** Par défaut NFS applique le **root squash** : un client connecté **en root**
+qui écrit dans le partage ne reçoit pas les droits root réels — le serveur « écrase »
+(*squash*) son identité vers `nobody` (UID 65534). Protection : sans ça, root sur une
+machine cliente = root sur les fichiers du serveur NFS.
+
+Comme les clients écrivent *en tant que* `nobody`, le dossier doit **appartenir à
+`nobody`** pour qu'ils puissent y écrire. Laissé à `root:root` en `755`, ils ne
+pourraient que lire.
+
+**D'où vient le chiffre.** UID sur 16 bits → max 65535. Réservés : `65535` = `-1`
+(invalide), `65534` = `nobody` juste en dessous. Vérifier : `id 65534`.
+
+**⚠️ Nuance.** `65534` partout = tout le monde partage la même identité anonyme : aucune
+séparation entre clients (A peut écraser les fichiers de B). Pour de vrais droits par
+utilisateur : conserver les UID réels (`no_root_squash`, ou mappage NFSv4 `idmapd` /
+Kerberos) — plus complexe, à ouvrir seulement quand le besoin arrive.
+
+### 18.6 Équivalent Kubernetes
 
 Même logique sous un autre nom : les **PersistentVolumes**, avec des modes d'accès :
 
