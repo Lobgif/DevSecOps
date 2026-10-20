@@ -2049,6 +2049,39 @@ Même logique sous un autre nom : les **PersistentVolumes**, avec des modes d'ac
 
 ---
 
+## 19. SSH : WSL ≠ Git Bash — deux environnements séparés
+
+**Date :** 2026-10-20
+
+Sur une même machine Windows, **Git Bash (MINGW64)** et **WSL** sont deux mondes
+indépendants, chacun avec son propre `~/.ssh/` (clés, `config`, `known_hosts`).
+
+| | Git Bash (MINGW64) | WSL (Ubuntu) |
+|---|---|---|
+| `~` pointe vers | `C:\Users\lahig` | `/home/lahigic` |
+| `~/.ssh/` | `C:\Users\lahig\.ssh\` | `/home/lahigic/.ssh/` |
+| Accès à l'autre | — | les fichiers Windows via `/mnt/c/Users/lahig/.ssh/` |
+
+**Conséquence :** un alias ou une clé qui marche dans l'un **n'existe pas** dans l'autre.
+`ssh aws-vm1` qui fonctionne dans Git Bash échouera dans WSL si la clé et le bloc `Host`
+ne sont pas aussi présents dans `/home/lahigic/.ssh/config`.
+
+**Symptôme vécu :** `Identity file /c/Users/lahig/.ssh/vm1.pem not accessible: No such
+file or directory` → la clé n'était pas à ce chemin dans cet environnement ; le vrai
+chemin était défini dans le `~/.ssh/config` de l'autre shell.
+
+**Règle pratique :**
+- Docker tourne dans **WSL** → pour tout ce qui touche Docker (volume sshfs, plugins,
+  déploiement SSH), c'est la clé et la config **côté WSL** qui comptent.
+- Pour partager une clé Windows vers WSL :
+  ```bash
+  cp /mnt/c/Users/lahig/.ssh/<cle> ~/.ssh/ && chmod 600 ~/.ssh/<cle>
+  ```
+- Toujours vérifier dans **quel** shell on est avant de débugger un « Permission denied
+  (publickey) » : le prompt `MINGW64` = Git Bash, un prompt Linux classique = WSL.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -2081,6 +2114,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Docker Desktop et WSL (intégration par distribution) — https://docs.docker.com/desktop/features/wsl/
 - systemd dans WSL — https://learn.microsoft.com/fr-fr/windows/wsl/systemd
 - Configuration WSL (`wsl.conf`, `appendWindowsPath`) — https://learn.microsoft.com/fr-fr/windows/wsl/wsl-config
+- WSL : accès aux fichiers Windows (`/mnt/c`) vs Linux — https://learn.microsoft.com/en-us/windows/wsl/filesystems
 - `usermod` (options `-a`, `-G`) — https://man7.org/linux/man-pages/man8/usermod.8.html
 - `newgrp` — https://man7.org/linux/man-pages/man1/newgrp.1.html
 
