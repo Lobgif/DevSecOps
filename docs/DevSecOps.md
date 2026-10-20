@@ -1967,7 +1967,77 @@ séparation entre clients (A peut écraser les fichiers de B). Pour de vrais dro
 utilisateur : conserver les UID réels (`no_root_squash`, ou mappage NFSv4 `idmapd` /
 Kerberos) — plus complexe, à ouvrir seulement quand le besoin arrive.
 
-### 18.6 Équivalent Kubernetes
+### 18.6 Volume plugins (pilotes de stockage tiers)
+
+Un volume plugin = un pilote tiers branché sur Docker pour parler à un stockage externe
+que le pilote `local` ne sait pas gérer.
+
+```bash
+docker plugin install vieux/sshfs
+docker plugin ls
+docker volume create -d vieux/sshfs \
+  -o sshcmd=user@serveur:/data -o password=xxx  mon_volume
+```
+
+| Plugin | Cible |
+|---|---|
+| REX-Ray | AWS EBS, GCP, OpenStack (historique) |
+| Portworx | Stockage distribué d'entreprise (snapshots, chiffrement, réplication) |
+| vieux/sshfs | Dossier distant via SSH (simple, pour tester) |
+| local-persist | Volume local à un chemin fixe |
+| GlusterFS / Ceph RBD | Stockage distribué redondant |
+
+**Plugin vs `--opt type=nfs` :** le NFS via `--driver local --opt type=nfs` utilise le
+pilote **intégré** (pas de plugin, suffit dans 90 % des cas). Le plugin sert quand Docker
+ne sait pas gérer le stockage nativement (EBS, Portworx, snapshots, chiffrement…).
+
+**En 2026 :** côté Docker Swarm l'écosystème de plugins stagne (beaucoup abandonnés), on
+reste souvent sur NFS/`local`. Côté Kubernetes, les volume plugins sont remplacés par le
+**CSI** (*Container Storage Interface*), le standard moderne — c'est en CSI que
+s'installent les drivers EBS/EFS, Longhorn, Ceph.
+
+### 18.7 Où installer le plugin, où créer le volume
+
+| Élément | Où |
+|---|---|
+| Backend de stockage (serveur NFS, Ceph…) | Une machine **joignable par tous les nœuds** |
+| Plugin / pilote de volume | Sur **CHAQUE nœud** qui exécutera une task utilisant le volume |
+| Création du volume | Déclarée **une fois** (dans la stack) — matérialisée sur chaque nœud où une task atterrit |
+
+⚠️ **En Swarm, aucune distribution automatique des plugins** : les installer à la main
+sur chaque nœud (ou via Ansible).
+
+**Cas 1 — une seule machine, plusieurs services :** tout au même endroit. Plugin installé
+1 fois, `docker volume create` 1 fois, tous les services partagent. Le pilote `local`
+suffit, pas besoin de NFS.
+
+**Cas 2 — 3 machines (vrai cluster) :**
+1. Monter le backend (NFS/Ceph) sur une machine à part joignable par les 3 (ne pas le
+   coloc sur un nœud Swarm → point de panne unique).
+2. Installer le plugin — ou `nfs-common` si NFS intégré — sur les **3** nœuds.
+3. **Ne pas** faire `docker volume create` à la main sur un seul nœud. Déclarer le volume
+   dans la **stack** pour que la définition (`driver_opts`) soit distribuée :
+   ```yaml
+   services:
+     api:
+       image: nginx
+       deploy: { replicas: 3 }
+       volumes:
+         - partage:/data
+   volumes:
+     partage:
+       driver: local
+       driver_opts:
+         type: nfs
+         o: "addr=192.168.1.100,rw"
+         device: ":/srv/nfs/partage"
+   ```
+   Chaque nœud monte le même export → `api.1/2/3` voient le même `/data`.
+
+**Piège :** un `docker volume create` manuel sur un seul nœud → les tasks des autres
+nœuds ne voient rien (ou créent un volume local vide). D'où la déclaration dans la stack.
+
+### 18.8 Équivalent Kubernetes
 
 Même logique sous un autre nom : les **PersistentVolumes**, avec des modes d'accès :
 
@@ -2151,6 +2221,10 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Longhorn — https://longhorn.io/docs/
 - MinIO (S3 self-hosted) — https://min.io/docs/minio/linux/index.html
 - Kubernetes PersistentVolumes (modes d'accès RWO/RWX/ROX) — https://kubernetes.io/docs/concepts/storage/persistent-volumes/
+- Docker : étendre avec des plugins — https://docs.docker.com/engine/extend/
+- `docker plugin` (install, ls, enable) — https://docs.docker.com/reference/cli/docker/plugin/
+- Kubernetes CSI (Container Storage Interface) — https://kubernetes-csi.github.io/docs/
+- Kubernetes : types de volumes — https://kubernetes.io/docs/concepts/storage/volumes/
 
 ### Réseau macvlan
 - Pilote macvlan — https://docs.docker.com/engine/network/drivers/macvlan/
