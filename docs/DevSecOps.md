@@ -1885,6 +1885,74 @@ utile pour comprendre les pare-feux, load balancers et CNI Kubernetes.
 
 ---
 
+## 18. Volumes partagés — entre services et entre clusters
+
+**Date :** 2026-10-20
+
+### 18.1 Le problème
+
+Un volume `local` vit **sur un seul nœud**. Dès que plusieurs services (ou clusters)
+doivent lire/écrire les mêmes données, il faut un stockage **accessible depuis
+l'extérieur des nœuds**.
+
+### 18.2 Plusieurs services du même cluster — NFS (le plus simple)
+
+Docker crée un volume NFS nativement :
+
+```bash
+docker volume create --driver local \
+  --opt type=nfs \
+  --opt o=addr=192.168.1.100,rw \
+  --opt device=:/export/partage \
+  vol_partage
+
+docker service create --name api --mount source=vol_partage,target=/data nginx
+```
+
+Tous les réplicas, sur n'importe quel nœud, voient le même `/data`.
+
+| Autre solution | Quand |
+|---|---|
+| CIFS/SMB | Partage Windows/NAS déjà en place |
+| AWS EFS (via NFS) | Sur EC2 — managé, scalable, zéro serveur à maintenir |
+| GlusterFS / Ceph | Redondance (éviter le serveur NFS unique = point de panne) |
+| Portworx / Longhorn / REX-Ray | Stockage distribué avancé (snapshots, réplication) |
+
+### 18.3 Entre plusieurs clusters
+
+Le volume Docker ne suffit plus : stockage réseau atteint par tous les clusters.
+
+| Solution | Principe |
+|---|---|
+| NFS / EFS partagé | Les deux clusters montent le même export réseau |
+| Ceph / GlusterFS | Cluster de stockage séparé, accessible par les deux |
+| Object storage (S3 / MinIO) | Les apps lisent/écrivent via l'API S3, pas via un montage disque — idéal fichiers, backups, artefacts |
+
+### 18.4 Piège majeur : l'écriture concurrente
+
+Partager un volume ≠ partager n'importe quelle donnée.
+
+- ✅ **Fichiers statiques, configs, uploads, assets** → NFS parfait, plusieurs
+  lecteurs/écrivains OK.
+- ❌ **Bases de données** (PostgreSQL, MySQL) → **jamais** deux instances sur le même
+  volume NFS, elles se corrompent mutuellement. Pour scaler une DB, utiliser sa
+  **réplication native** (streaming replication Postgres), pas un volume partagé.
+
+**Règle :** le volume partagé sert aux données « plates » (fichiers). Les données
+transactionnelles (DB) se répliquent au niveau applicatif, pas au niveau stockage.
+
+### 18.5 Équivalent Kubernetes
+
+Même logique sous un autre nom : les **PersistentVolumes**, avec des modes d'accès :
+
+| Mode | Signification |
+|---|---|
+| `ReadWriteOnce` (RWO) | Monté en lecture/écriture par **un seul** nœud |
+| `ReadWriteMany` (RWX) | Lecture/écriture par **plusieurs** nœuds (nécessite NFS/Ceph/EFS) |
+| `ReadOnlyMany` (ROX) | Lecture seule par plusieurs nœuds |
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -2047,6 +2115,16 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - iproute2 par exemple (`ip link`, `ip route`, `ip addr`) — https://baturin.org/docs/iproute2/
 - nftables wiki (pare-feu Linux, remplace iptables) — https://wiki.nftables.org/wiki-nftables/index.php/Main_Page
 - Stéphane Robert — réseau Docker (bridge, overlay, macvlan, ipvlan, host, none) — https://blog.stephane-robert.info/docs/conteneurs/moteurs-conteneurs/docker/network/
+
+### Volumes partagés
+- Volumes Docker (options NFS/CIFS) — https://docs.docker.com/engine/storage/volumes/
+- `docker volume create` — https://docs.docker.com/reference/cli/docker/volume/create/
+- AWS EFS — https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html
+- Ceph — https://docs.ceph.com/en/latest/
+- GlusterFS — https://docs.gluster.org/en/latest/
+- Longhorn — https://longhorn.io/docs/
+- MinIO (S3 self-hosted) — https://min.io/docs/minio/linux/index.html
+- Kubernetes PersistentVolumes (modes d'accès RWO/RWX/ROX) — https://kubernetes.io/docs/concepts/storage/persistent-volumes/
 
 ### Réseau macvlan
 - Pilote macvlan — https://docs.docker.com/engine/network/drivers/macvlan/
