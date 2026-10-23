@@ -2463,6 +2463,59 @@ docker compose down -v && docker compose up -d
 
 ---
 
+## 26. Réseaux Compose : qui doit parler à qui (moindre privilège)
+
+**Date :** 2026-10-23
+
+### 26.1 La règle absolue
+
+**Deux conteneurs ne peuvent communiquer que s'ils partagent au moins un réseau.**
+La bonne question pour chaque service : « avec qui a-t-il besoin de parler ? » → le mettre
+sur le(s) réseau(x) qui couvre(nt) ces interlocuteurs, **et rien de plus** (moindre privilège).
+
+Exemple de chaîne : `web → api → db`. `api` est au milieu → il lui faut un réseau commun
+avec `web` **et** un réseau commun avec `db`.
+
+### 26.2 « public » ≠ exposé à Internet
+
+Piège de nom : `public` et `internal` ne sont que **deux réseaux bridge**, les noms sont une
+**convention**. Mettre un service sur le réseau `public` ne l'expose **pas** au monde. Un
+conteneur n'est joignable de l'extérieur **que** s'il a `ports:` (publication sur l'hôte).
+
+### 26.3 Trois topologies valables pour `web → api → db`
+
+```
+Option A (simple) — api sur les deux
+  public   : web, api
+  internal : api, db          → db reste privé ✅
+
+Option B — web aussi en interne
+  public   : web
+  internal : web, api, db     → api reste internal-only
+
+Option C (prod, reverse proxy) — le plus sûr
+  public   : proxy (Traefik/nginx)   ← seul à publier des ports
+  internal : proxy, web, api, db      → rien d'autre n'est joignable de l'extérieur
+```
+
+| Moment | Choix |
+|---|---|
+| Apprentissage | Option A (direct, ça marche) |
+| Durcissement / prod | Option C (surface minimale, cf. agoraci + Traefik) |
+
+### 26.4 Grille de revue d'un compose (checklist)
+
+- [ ] **Secrets jamais commités** : `secrets/*.txt` dans `.gitignore`, seuls les `.example` versionnés (section 25).
+- [ ] **Réseaux cohérents** : chaque service partage un réseau avec ses interlocuteurs (sinon `Connection refused`).
+- [ ] **Base non exposée** : pas de `ports:` sur la DB si seule l'app la joint (elle passe par le réseau interne).
+- [ ] **Healthcheck compatible `_FILE`** : `${VAR}` est une interpolation **hôte** (vide si la valeur n'est qu'en secret) → lire `/run/secrets/<nom>` dans le conteneur.
+- [ ] **Config DB sur l'app** : le service applicatif a bien ses variables de connexion (sinon migrations/app ne savent pas où est la base).
+- [ ] **`depends_on` en forme longue** avec `condition: service_healthy` (attendre prêt, pas démarré).
+- [ ] **Chemins relatifs** résolus depuis le dossier du compose (attention aux `./infra/...` quand le compose est déjà dans `infra/`).
+- [ ] **Mot de passe non vide** (ex : Postgres refuse de s'initialiser sans `POSTGRES_PASSWORD`).
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
