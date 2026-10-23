@@ -2082,6 +2082,302 @@ chemin était défini dans le `~/.ssh/config` de l'autre shell.
 
 ---
 
+## 20. Clés SSH : emplacement, permissions, config, EC2
+
+**Date :** 2026-10-23
+
+### 20.1 Le piège de l'emplacement
+
+`ssh-keygen` sauve la clé **là où tu réponds au prompt**. Si tu tapes un nom seul
+(`id_ed25519_gitlab`) au lieu d'un chemin complet, la clé atterrit dans le **dossier
+courant**, pas dans `~/.ssh/`.
+
+```bash
+# ✅ chemin complet → va dans ~/.ssh/
+ssh-keygen -t ed25519 -C "mail@ex.com" -f ~/.ssh/id_ed25519_github
+```
+
+### 20.2 Permissions (et pourquoi)
+
+| Cible | Droits | Pourquoi |
+|---|---|---|
+| Dossier `~/.ssh/` | `700` (`rwx------`) | Un dossier a besoin de `x` pour qu'on « entre » dedans ; personne d'autre |
+| Clé **privée** | `600` (`rw-------`) | Secret absolu ; SSH **refuse** une clé privée trop ouverte |
+| Clé **publique** | `644` (`rw-r--r--`) | Faite pour être partagée, aucun risque |
+
+Lecture : chaque chiffre = `r(4)+w(2)+x(1)`, pour **propriétaire · groupe · autres**.
+
+### 20.3 Config multi-hôtes (`~/.ssh/config`)
+
+```
+Host gitlab.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519_gitlab
+    IdentitiesOnly yes
+
+Host github.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
+```
+
+`IdentitiesOnly yes` force SSH à n'essayer **que** la clé indiquée pour cet hôte (évite
+le « Too many authentication failures » quand tu as plusieurs clés). ⚠️ Ne jamais éditer
+ce fichier avec `sudo` : il appartiendrait à root et SSH l'ignorerait.
+
+### 20.4 Se connecter à une VM EC2 (AWS)
+
+| Point | Détail |
+|---|---|
+| Clé | AWS fournit un `.pem` (clé privée) ; `chmod 400` obligatoire |
+| Utilisateur | `ubuntu` (Ubuntu), `ec2-user` (Amazon Linux), `admin`/`debian` (Debian) |
+| IP publique | Visible dans la console EC2 (**Public IPv4**) ; **change à chaque stop/start** |
+| IP fixe | Attacher une **Elastic IP** (gratuite tant qu'attachée à une instance active) |
+| Échec `Permission denied (publickey)` | Clé non fournie (`-i`), mauvaise clé, ou mauvais utilisateur |
+| Échec `timed out` | Security Group : port 22 fermé, ou instance stoppée |
+
+```bash
+ssh -i ~/.ssh/ma-cle.pem ubuntu@13.37.224.250
+```
+
+### 20.5 Copier une clé de Windows vers WSL
+
+```bash
+cp /mnt/c/Users/lahig/.ssh/<cle> ~/.ssh/ && chmod 600 ~/.ssh/<cle>
+```
+Voir [[docs-two-journals]] et la section 19 : WSL et Git Bash ont des `~/.ssh/` séparés.
+`gh` n'est pas installé dans WSL (il l'est côté Windows) → on peut appeler `gh.exe`
+depuis WSL, ou installer `gh` via le dépôt officiel.
+
+---
+
+## 21. Voir les adresses réseau par couche + `ss` + sockets
+
+**Date :** 2026-10-23
+
+### 21.1 Modèle en couches
+
+Sur une machine Windows+WSL+Docker, les réseaux sont **emboîtés** :
+```
+Windows (vraie machine)
+  └── WSL2 = VM Linux cachée        ← IP: ip -br addr → eth0
+        ├── Docker (docker0, br-*)  ← 172.17/18/19…
+        └── libvirt/KVM (virbr0)    ← 192.168.122.x
+```
+
+| Couche | Commande |
+|---|---|
+| Windows | `ipconfig` |
+| Linux/WSL/VM/EC2 | `ip -br addr`, `ip route`, `ip -br link` |
+| Docker (réseaux) | `docker network ls`, `docker network inspect <net>` |
+| Docker (conteneur) | `docker inspect <c> -f '{{.NetworkSettings.Networks.<net>.IPAddress}}'` |
+
+Lire `ip route` : la ligne `default via X dev eth0` = la sortie ; `src Y` = l'IP portée
+par la machine sur cette interface ; `linkdown` = bridge sans conteneur connecté.
+
+### 21.2 `ss -tlnp` : qu'est-ce qui écoute (= surface d'attaque)
+
+| Option | Rôle |
+|---|---|
+| `-t` | TCP · `-u` | UDP |
+| `-l` | sockets en écoute (LISTEN) |
+| `-n` | numérique (garde les numéros de port) |
+| `-p` | le processus (**nécessite `sudo`**) |
+
+Colonne décisive = **Local Address** :
+
+| Adresse | Qui peut se connecter |
+|---|---|
+| `127.0.0.1` / `%lo` | la machine elle-même → sûr |
+| `0.0.0.0` / `*` | **toutes les interfaces** → exposé à l'extérieur ⚠️ |
+| `[::]` | idem en IPv6 |
+
+`Recv-Q` sur un LISTEN = connexions en attente d'acceptation ; `Send-Q` = taille max de
+la file (backlog). Tout ce qui est en `0.0.0.0` est à questionner (NFS 2049, Swarm
+2377/7946… à restreindre par pare-feu).
+
+### 21.3 Socket ≠ réseau ≠ protocole
+
+| Notion | Analogie téléphone | En vrai |
+|---|---|---|
+| Réseau | câbles, central | IP, routeurs, NAT |
+| Protocole | la langue | TCP, UDP, HTTP, SSH |
+| Port | le numéro de poste | quel service (80, 22…) |
+| **Socket** | le combiné d'un programme | point de communication qu'un programme ouvre |
+
+Deux familles de sockets :
+- **Socket réseau** (TCP/UDP) : identifié par **IP:port**, entre machines.
+- **Socket Unix** : identifié par un **chemin de fichier**, même machine.
+
+**`docker.sock` n'est PAS un fichier texte** : c'est un **socket Unix**
+(`srw-rw----`, le `s` le prouve), la porte d'entrée du démon. Le client écrit une requête
+HTTP dedans, le démon lit et répond. Qui peut écrire dessus = **root** sur la machine.
+
+---
+
+## 22. L2 vs L3 et ipvlan (complète la section 16)
+
+**Date :** 2026-10-23
+
+### 22.1 La notion
+
+| | Couche 2 (L2) | Couche 3 (L3) |
+|---|---|---|
+| Adresse | MAC | IP |
+| Équipement | switch | routeur |
+| Portée | un même réseau local | **entre** réseaux |
+| Résolution | ARP (IP→MAC) | routage |
+
+Règle : même sous-réseau → échange direct en L2 (ARP). Sous-réseaux différents → il faut
+un routeur (L3). Preuve : `docker exec c ip neigh` (table ARP = L2) vs `ip route`
+(route par défaut = le routeur L3).
+
+### 22.2 macvlan vs ipvlan L2 vs ipvlan L3
+
+| | macvlan | ipvlan L2 | ipvlan L3 |
+|---|---|---|---|
+| MAC | 1 par conteneur | partagée (hôte) | partagée (hôte) |
+| Broadcast/ARP | oui | oui | **non** |
+| Sous-réseaux multiples | non | non | **oui** |
+| Rôle de l'hôte | pont L2 | pont L2 | **routeur L3** |
+| Cas typique | home lab, appliance | **cloud (1 MAC/port)** | grande échelle, sans broadcast |
+
+```bash
+docker network create -d ipvlan -o parent=eth0 -o ipvlan_mode=l2 … ipvlan_l2
+docker network create -d ipvlan -o parent=eth0 -o ipvlan_mode=l3 … ipvlan_l3
+```
+
+**Piège ipvlan L3 :** le reste du réseau ne connaît pas tes sous-réseaux → il faut
+ajouter une **route statique** sur le routeur physique vers l'IP de l'hôte, sinon les
+réponses ne reviennent jamais.
+
+**Mode host — preuve vécue :** `docker run --network host … hostname -I` affiche **toutes**
+les IP de l'hôte (les `.1` = gateways de l'hôte, pas des conteneurs). Un `.2`+ signalerait
+du bridge. Sur WSL, « hôte » = la VM WSL, pas Windows.
+
+---
+
+## 23. Débugger méthodiquement : étude de cas WordPress + MySQL
+
+**Date :** 2026-10-23
+
+Un WordPress Compose renvoyait *« Error establishing a database connection »* (HTTP 500).
+Méthode : **lire l'erreur exacte, éliminer les causes une par une avec des preuves.**
+
+### 23.1 Lire le message mysqli — chaque erreur a un sens précis
+
+| Erreur mysqli | Signification |
+|---|---|
+| `Access denied for user X@host` | TCP OK, **auth** refusée (mauvais mot de passe / user@host) |
+| `Unknown database 'X'` | connecté mais la base n'existe pas |
+| `Unknown MySQL server host` / getaddrinfo | **DNS** : le nom ne résout pas |
+| `Connection refused` | le nom résout, mais **rien n'écoute** sur le port par ce chemin |
+| `Can't connect` / timeout | réseau / pare-feu |
+
+### 23.2 Le piège socket ≠ TCP
+
+`docker compose exec mysql mysql -uwordpress -p… -e "SELECT 1"` **passe** → mais via le
+**socket Unix local** du conteneur. Ça **ne prouve pas** que le port 3306 est joignable en
+**TCP** depuis un autre conteneur. Le vrai test reproduit ce que fait l'app :
+```bash
+docker compose exec wordpress php -r '$m=@mysqli_connect("mysql","wordpress","PWD","wordpress"); echo $m?"OK\n":mysqli_connect_error()."\n";'
+```
+
+### 23.3 Le vrai coupable : l'init MySQL ne se fait qu'une fois
+
+MySQL (et Postgres, Mongo…) ne crée l'utilisateur / la base / le mot de passe qu'au
+**premier démarrage, sur un volume vide**. Preuve dans les logs :
+- volume **neuf** → `Initializing database files` + `Creating user wordpress`
+- volume **réutilisé** → `XA crash recovery` et **aucune** ligne `Creating…`
+
+Si le volume existe déjà (d'un essai précédent, d'un autre fichier compose), les variables
+`MYSQL_USER`/`MYSQL_PASSWORD` sont **ignorées** → l'utilisateur garde son **ancien** mot de
+passe → `Access denied`. D'où une erreur qui **change** d'un test à l'autre quand on relance
+sans cesse (`Connection refused` au boot, puis `Access denied` sur vieux volume).
+
+**Règle d'or :** quand on change les identifiants d'une base en dev → **repartir d'un
+volume vide** :
+```bash
+docker compose down -v        # supprime conteneurs ET volumes
+docker volume ls | grep <projet>   # vérifier qu'ils ont disparu
+docker compose up -d
+```
+⚠️ `down -v` ne supprime que les volumes **déclarés dans le compose actuel** ; les volumes
+d'un ancien fichier (`db` vs `db_data`) restent orphelins → `docker volume rm` à la main.
+
+### 23.4 La vraie correction : healthcheck + `service_healthy`
+
+`depends_on: - mysql` attend que mysql **démarre**, pas qu'il soit **prêt**. D'où un
+`Connection refused` au boot (l'app tente trop tôt, puis le navigateur garde le 500 en
+cache).
+
+```yaml
+  mysql:
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+  wordpress:
+    depends_on:
+      mysql:
+        condition: service_healthy
+```
+
+### 23.5 Ce qui ne change RIEN à la connexion (à savoir)
+
+- `MYSQL_ROOT_PASSWORD` / `MYSQL_RANDOM_ROOT_PASSWORD` → concernent **root** ; WordPress se
+  connecte en `wordpress`, pas root.
+- `volumes: - wordpress:/var/www/html` → persiste les **fichiers** PHP, aucun lien avec la DB.
+
+---
+
+## 24. Registre d'images : bake, format de référence, GHCR
+
+**Date :** 2026-10-23
+
+### 24.1 `docker buildx bake` : `type=docker` vs `type=registry`
+
+| `output` | Effet |
+|---|---|
+| `type=docker` | charge l'image **en local uniquement** ; ne supporte pas le multi-plateforme |
+| `type=registry` | **pousse** sur le registre ; gère le multi-archi (OCI index) |
+
+Conséquence : avec `type=docker`, Swarm avertit *« image could not be accessed on a
+registry »* car l'image n'est que locale → sur un cluster multi-nœuds, les autres nœuds
+ne peuvent pas la tirer. En Swarm, l'image **doit** vivre dans un registre.
+
+### 24.2 Format de référence : un seul `:tag`
+
+Erreur `invalid reference format` sur un cache :
+```hcl
+ref=${REGISTRY}/app:buildcache:${TAG}   # ghcr.io/lobgif/app:buildcache:dev → DEUX tags ❌
+```
+Une référence OCI = `registre/namespace/nom:UN_seul_tag`. Corriger en mettant l'étiquette
+**dans** le tag : `app:buildcache-${TAG}` (= `buildcache-dev`, un seul tag) ✅.
+
+### 24.3 Pousser sur GHCR
+
+- Namespace = ton **compte GitHub** (`ghcr.io/lobgif`, pas l'email `lahigic`). On ne peut
+  pousser que dans un compte/org qu'on possède.
+- Auth : `gh auth token | docker login ghcr.io -u <compte> --password-stdin` (après
+  `gh auth refresh -s write:packages`), ou un PAT classique avec `write:packages`.
+- Vérifier sans navigateur : `docker buildx imagetools inspect ghcr.io/<compte>/<image>:<tag>`
+  → s'il répond (archis + attestations SBOM/provenance), c'est publié.
+
+### 24.4 Pourquoi « je ne vois pas mon package »
+
+- Le package GHCR est **privé par défaut** → un visiteur **non connecté** (ou un autre
+  compte) voit une page vide. Indice : le profil montre « Follow » / « Block or report user »
+  au lieu de « Edit profile » = **pas connecté au bon compte** dans ce navigateur.
+- Il se voit sur le **profil → onglet Packages** (`github.com/<compte>?tab=packages`), **pas**
+  dans `Settings → Packages` (qui ne gère que permissions et paquets supprimés).
+- Pour l'afficher sur la page du dépôt (comme GitLab le fait nativement dans
+  *Deploy → Container Registry*) : page du package → **Connect repository** + *Change
+  visibility* pour le rendre public.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -2260,10 +2556,30 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Kubernetes CSI (Container Storage Interface) — https://kubernetes-csi.github.io/docs/
 - Kubernetes : types de volumes — https://kubernetes.io/docs/concepts/storage/volumes/
 
-### Réseau macvlan
+### Clés SSH & EC2
+- `ssh-keygen` — https://man.openbsd.org/ssh-keygen
+- EC2 : paires de clés — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html
+- EC2 : Elastic IP (IP fixe) — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html
+
+### Sockets & diagnostic réseau
+- `ss(8)` (sockets en écoute) — https://man7.org/linux/man-pages/man8/ss.8.html
+- `unix(7)` (sockets Unix, ex docker.sock) — https://man7.org/linux/man-pages/man7/unix.7.html
+- `socket(7)` — https://man7.org/linux/man-pages/man7/socket.7.html
+
+### Réseau macvlan & ipvlan
 - Pilote macvlan — https://docs.docker.com/engine/network/drivers/macvlan/
+- Pilote ipvlan (modes L2/L3) — https://docs.docker.com/engine/network/drivers/ipvlan/
 - `ip-route(8)` — https://man7.org/linux/man-pages/man8/ip-route.8.html
 - `ip-link(8)` — https://man7.org/linux/man-pages/man8/ip-link.8.html
+
+### Compose, bases de données & registre
+- Images officielles MySQL (init, variables) — https://hub.docker.com/_/mysql
+- Image officielle WordPress — https://hub.docker.com/_/wordpress
+- Compose : services (`depends_on`, `healthcheck`, `condition: service_healthy`) — https://docs.docker.com/reference/compose-file/services/
+- docker buildx bake — https://docs.docker.com/build/bake/
+- `docker buildx bake` (référence CLI) — https://docs.docker.com/reference/cli/docker/buildx/bake/
+- GitHub Container Registry (GHCR) — https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+- OCI distribution spec (format des références) — https://github.com/opencontainers/distribution-spec
 
 ### Docker Swarm
 - Vue d'ensemble Swarm — https://docs.docker.com/engine/swarm/
