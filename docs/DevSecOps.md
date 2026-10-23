@@ -2378,6 +2378,91 @@ Une référence OCI = `registre/namespace/nom:UN_seul_tag`. Corriger en mettant 
 
 ---
 
+## 25. Secrets Compose par fichier (`_FILE`) sans les pousser
+
+**Date :** 2026-10-23
+
+### 25.1 Le pattern `_FILE`
+
+Les variables en `_FILE` disent à l'image de **lire le mot de passe dans un fichier**, pas
+dans une variable d'environnement en clair. Compose monte chaque fichier dans le conteneur
+à `/run/secrets/<nom>`.
+
+```yaml
+services:
+  wordpress:
+    environment:
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/WORDPRESS_DB_PASSWORD
+    secrets:
+      - WORDPRESS_DB_PASSWORD
+  mysql:
+    environment:
+      MYSQL_PASSWORD_FILE: /run/secrets/MYSQL_PASSWORD
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/MYSQL_ROOT_PASSWORD
+    secrets:
+      - MYSQL_PASSWORD
+      - MYSQL_ROOT_PASSWORD
+
+secrets:
+  WORDPRESS_DB_PASSWORD:
+    file: ./secrets/wordpress_db_password.txt
+  MYSQL_PASSWORD:
+    file: ./secrets/mysql_password.txt
+  MYSQL_ROOT_PASSWORD:
+    file: ./secrets/mysql_root_password.txt
+```
+
+**Gain sécurité :** le mot de passe n'est plus en clair dans le `docker-compose.yml` ni
+visible dans `docker inspect` / l'environnement du conteneur (Shift Left).
+
+### 25.2 Où vivent les fichiers
+
+| | Sur la machine | Dans le dépôt |
+|---|---|---|
+| `secrets/*.txt` (vrais) | ✅ obligatoire (Compose les lit au `up`) | ❌ jamais |
+| `secrets/*.txt.example` | optionnel | ✅ modèles versionnés |
+| `docker-compose.yml` | ✅ | ✅ (plus de mot de passe dedans) |
+
+Le dossier `secrets/` vit **à côté** du `docker-compose.yml`, en local.
+
+### 25.3 Créer les fichiers — deux pièges
+
+```bash
+mkdir -p secrets
+printf 'MotDePasseFort123' > secrets/wordpress_db_password.txt
+printf 'MotDePasseFort123' > secrets/mysql_password.txt       # MÊME valeur
+printf 'RootTresFort456'   > secrets/mysql_root_password.txt
+```
+
+- ⚠️ **`printf` / `echo -n`, jamais `echo` seul** : `echo` ajoute un `\n` qui ferait partie
+  du mot de passe → `Access denied` incompréhensible.
+- ⚠️ `wordpress_db_password.txt` = `mysql_password.txt` (même mot de passe du même
+  utilisateur `wordpress`, côté app et côté base).
+
+### 25.4 Ne jamais pousser les vrais secrets
+
+```gitignore
+secrets/*.txt
+!secrets/*.example
+```
+→ les `.example` (valeurs factices) partent dans le dépôt comme modèles, les vrais `.txt`
+restent locaux.
+
+### 25.5 Changer le mécanisme = volume à vider
+
+Passer de `MYSQL_PASSWORD` à `MYSQL_PASSWORD_FILE` change la source du mot de passe. Si le
+volume existe déjà, il garde l'**ancien** → `Access denied`. Repartir d'un volume vide
+(voir section 23) :
+```bash
+docker compose down -v && docker compose up -d
+```
+
+> Note : ce sont les secrets **Compose** (montage d'un fichier local dans `/run/secrets/`),
+> à ne pas confondre avec les secrets **Swarm** (`docker secret create`, chiffrés dans le
+> Raft), voir section 15.8.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
