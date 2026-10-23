@@ -2516,6 +2516,81 @@ Option C (prod, reverse proxy) — le plus sûr
 
 ---
 
+## 27. Quatre pièges d'images/versions (stack multi-services)
+
+**Date :** 2026-10-23 (rencontrés en montant un stack Compose db+redis+rabbitmq+minio+api+web)
+
+### 27.1 MinIO : les images communautaires ont disparu
+
+`minio/minio` (Docker Hub) et `quay.io/minio/minio` ne sont **plus téléchargeables** (MinIO
+Inc a verrouillé la communauté en 2025). Symptôme : `pull access denied ... repository does
+not exist` **même après `docker login`** (« repository does not exist » = ce n'est pas de
+l'auth, le dépôt n'est plus là).
+
+**Solution :** le fork libre **`pgsty/silo`** (AGPL, par Pigsty), compatible à 100% (mêmes
+variables `MINIO_*`, même commande `server /data`). Épinglé :
+```yaml
+image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+```
+
+### 27.2 RabbitMQ 4 : les variables `_FILE` ne marchent plus
+
+`RABBITMQ_DEFAULT_USER_FILE` / `RABBITMQ_DEFAULT_PASS_FILE` sont **indisponibles depuis la
+3.9** → en v4 le conteneur **sort en erreur** (`deprecated environment variables detected`).
+Les variables **plaines** `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS`, elles, marchent
+encore.
+
+**Solution (garder les secrets en fichiers)** — un entrypoint qui lit le secret et exporte
+la variable plaine :
+```yaml
+  rabbitmq:
+    image: rabbitmq:4-management-alpine@sha256:...
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        export RABBITMQ_DEFAULT_USER="$$(cat /run/secrets/rabbitmq_user)"
+        export RABBITMQ_DEFAULT_PASS="$$(cat /run/secrets/rabbitmq_password)"
+        exec docker-entrypoint.sh rabbitmq-server
+    secrets: [rabbitmq_user, rabbitmq_password]
+```
+`$$` = échappe l'interpolation Compose → `$(cat …)` exécuté dans le conteneur. Avantage sur
+un `rabbitmq.conf` : **pas de duplication** du mot de passe (une seule source, les fichiers
+secrets lus aussi par l'app). Alternative officielle v4 : `rabbitmq.conf` avec `default_user`
+/ `default_pass` dans `/etc/rabbitmq/rabbitmq.conf`.
+
+### 27.3 PostgreSQL 18 : monter `/var/lib/postgresql`, pas `/data`
+
+PG 18 range les données dans un sous-dossier par version majeure et attend le montage sur le
+**parent**. Monter `/var/lib/postgresql/data` (layout ≤ 17) → le conteneur **refuse de
+démarrer** (« PostgreSQL data in /var/lib/postgresql/data (unused mount/volume) »).
+```yaml
+volumes:
+  - pgdata:/var/lib/postgresql    # et non /var/lib/postgresql/data
+```
+Breaking change lié à la version → d'où l'importance de lire les notes de version d'une image.
+
+### 27.4 Contexte de build en monorepo
+
+Un Dockerfile qui fait `COPY backend/…` (avec préfixe de dossier) a besoin que le **contexte
+englobe `backend/`** → le contexte est le **parent**, pas le dossier du service :
+```yaml
+  api:
+    build:
+      context: ..                  # racine qui contient backend/ et frontend/
+      dockerfile: backend/Dockerfile
+```
+`context: ../backend` échoue (`"/backend": not found`) car le Dockerfile cherche un
+sous-dossier `backend/` qui n'existe pas dans ce contexte. Voir section 24 (contexte = boîte).
+
+### 27.5 Le fil conducteur
+
+Trois de ces quatre pièges sont des **breaking changes de version d'image** (MinIO retiré,
+RabbitMQ 4 sans `_FILE`, PG18 nouveau layout). La parade : épingler par **digest**, et lire
+l'erreur exacte (`docker compose logs <service>`) — chaque message nommait précisément la
+cause. Voir la méthode section 23.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -2718,6 +2793,15 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `docker buildx bake` (référence CLI) — https://docs.docker.com/reference/cli/docker/buildx/bake/
 - GitHub Container Registry (GHCR) — https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 - OCI distribution spec (format des références) — https://github.com/opencontainers/distribution-spec
+
+### Pièges images/versions (stack multi-services)
+- MinIO communautaire retiré / fork libre (guide Stéphane Robert) — https://www.stephane-robert.info/docs/services/stockage/minio/
+- Pigsty (éditeur du fork `pgsty/silo`) — https://github.com/pgsty/pigsty
+- `pgsty/silo` sur Docker Hub — https://hub.docker.com/r/pgsty/silo
+- RabbitMQ : configuration (`default_user`/`default_pass`, rabbitmq.conf) — https://www.rabbitmq.com/docs/configure
+- RabbitMQ image Docker (variables `_FILE` indisponibles ≥ 3.9) — https://hub.docker.com/_/rabbitmq
+- PostgreSQL 18 : nouveau layout des données (montage `/var/lib/postgresql`) — https://github.com/docker-library/postgres/pull/1259
+- Docker : contexte de build — https://docs.docker.com/build/concepts/context/
 
 ### Docker Swarm
 - Vue d'ensemble Swarm — https://docs.docker.com/engine/swarm/
