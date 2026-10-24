@@ -2591,6 +2591,134 @@ cause. Voir la méthode section 23.
 
 ---
 
+## 28. Swarm, Raft, consensus et quorum
+
+**Date :** 2026-10-24
+
+### 28.1 Rôles : managers, workers, leader, followers
+
+| Rôle | Fonction |
+|---|---|
+| **Manager** | **Décide** (scheduling, état du cluster), répond aux `docker service …` |
+| **Worker** | **Exécute** les tasks ; ne décide rien |
+| **Leader** | LE manager qui mène : reçoit tous les changements et les réplique |
+| **Follower** | Manager qui suit le leader, copie son journal, prêt à prendre la relève |
+
+Un manager peut aussi exécuter des tasks ; un worker ne décide jamais. On scale les
+**workers** librement (des centaines), mais pas les managers.
+
+### 28.2 Consensus, Raft, quorum
+
+Plusieurs managers doivent partager **le même état**. S'accorder malgré pannes/coupures =
+le **consensus**, résolu par l'algorithme **Raft**. Le **quorum** = nombre minimum de
+managers d'accord et joignables pour **décider** :
+```
+quorum = (n / 2) + 1        (strictement plus de la moitié)
+```
+
+**Pourquoi la majorité (et pas la moitié) :** éviter le **split-brain**. Si le réseau coupe
+le cluster en deux, un seul groupe peut atteindre la majorité → un seul décide → cohérence.
+Avec la moitié, les deux groupes décideraient → états contradictoires.
+
+### 28.3 Tolérance aux pannes et nombre impair
+
+```
+pannes tolérées = n - quorum
+```
+
+| Managers | Quorum | Pannes tolérées |
+|---|---|---|
+| 1 | 1 | 0 |
+| 3 | 2 | **1** |
+| 4 | 3 | 1 |
+| 5 | 3 | **2** |
+| 7 | 4 | 3 |
+
+3 et 4 tolèrent tous deux **1** panne, mais 4 exige un quorum plus grand → plus fragile,
+zéro bénéfice. **Toujours un nombre impair** (3 ou 5). Quorum perdu → cluster en **lecture
+seule** (les tasks continuent, mais plus aucune nouvelle décision).
+
+### 28.4 Pourquoi plus de managers ralentit les écritures
+
+Chaque écriture (service create/update/scale, chaque statut de task…) doit obtenir le
+consensus : le **leader** réplique à **tous** les followers et attend la **majorité** d'acks.
+Plus de managers = quorum plus grand (plus d'acks à attendre) **et** leader qui réplique à
+plus de monde (goulot unique). Les écritures ne se répartissent pas (tout passe par le
+leader) → ajouter un manager **ralentit**, sans gagner en débit. D'où **3 ou 5**. Garder les
+managers **proches** (faible latence) car chaque écriture attend des acks sur le réseau.
+
+### 28.5 Élection du leader
+
+On ne choisit **pas** le leader, il est **élu** :
+1. **Minuteur aléatoire** (ex. 150–300 ms) remis à zéro à chaque heartbeat.
+2. Le leader tombe → plus de heartbeats → un follower expire en premier → devient
+   **candidate**, passe au **terme** suivant, vote pour lui-même.
+3. Il envoie **`RequestVote`** aux autres (terme, id, index/terme de sa dernière entrée).
+4. Chaque manager vote **oui** si : terme ≥ le sien, **pas déjà voté** ce terme, et **journal
+   du candidat au moins aussi à jour** que le sien.
+5. Majorité atteinte (`(n/2)+1`) → **leader** → heartbeats.
+
+Le choix ne dépend **pas** de la puissance de la machine : juste **qui expire en premier**
+(hasard) + **journal à jour**.
+
+**L'élection peut échouer** (split vote : deux candidats se partagent les voix → aucune
+majorité → nouveau terme, nouveaux minuteurs). Un manager **refuse de voter** s'il a déjà
+voté ce terme, si le journal du candidat est **en retard**, ou si le terme est plus vieux.
+
+### 28.6 Le journal (log) et « committed »
+
+Le **journal** = suite ordonnée, append-only, d'**entrées** = opérations d'état sérialisées :
+```
+index 40, terme 6 : CreateService "web" (replicas=2)
+index 41, terme 6 : UpdateService "web" replicas=4
+index 42, terme 6 : AssignTask web.3 → worker1
+index 43, terme 7 : TaskStatus web.3 = running
+```
+Une entrée est **committed** quand **une majorité** de managers l'a dans son journal (pas
+tout le monde). Le leader avance alors son `commitIndex`, applique l'entrée, et le signale
+aux followers (heartbeat). « Committed » = durable même si le leader meurt.
+
+### 28.7 RPC, gRPC, AppendEntries, le terme
+
+- **RPC** (*Remote Procedure Call*) = appeler une fonction qui s'exécute sur une **autre
+  machine** comme si elle était locale. Orienté **action** (≠ REST orienté ressource).
+- **gRPC** = l'implémentation de Google (HTTP/2 + Protocol Buffers), utilisée par SwarmKit
+  sur le port **2377**.
+- **`AppendEntries`** = l'un des deux RPC de Raft (avec `RequestVote`). Double usage :
+  **répliquer** des entrées, ou **heartbeat** quand il est vide.
+- **Le terme** = horloge logique de Raft : entier croissant découpant le temps en mandats
+  (un terme = une élection, au plus un leader). Chaque message porte son terme : un terme
+  **plus grand** vu → on devient follower ; un terme **plus petit** reçu → rejeté. C'est ce
+  qui détecte un vieux leader revenu et empêche les deux leaders.
+
+### 28.8 Flux complet d'une décision (`docker service scale web=4`)
+
+```
+toi → API (un manager) → [redirige vers le LEADER]
+  LEADER : orchestrator (désiré=4, actuel=2 → 2 tasks)
+         → allocator (IP/réseau) → scheduler (quel nœud)
+         → RAFT : réplique aux followers (AppendEntries), attend la MAJORITÉ → committed
+         → DISPATCHER (gRPC) → agents des WORKERS
+  WORKERS : agent → dockerd → conteneur démarre → statut remonte
+         → RAFT (réécriture du statut) → visible dans docker service ps
+  [boucle de réconciliation : compare désiré vs réel en continu → auto-réparation]
+```
+
+### 28.9 Ce qu'on peut réellement observer
+
+Raft est **interne** : Docker n'expose **ni les votes ni le journal brut** (stocké chiffré
+dans `/var/lib/docker/swarm/raft/`). On observe les **résultats** :
+```bash
+docker node ls                                              # Leader / Reachable
+docker node inspect manager1 --format '{{ json .ManagerStatus }}'
+docker info                                                 # section Swarm (Managers, Nodes…)
+docker events                                               # création/arrêt de tasks
+journalctl -u docker | grep -i raft                         # messages Raft bas niveau (manager)
+```
+Pour *voir* Raft en action : la visualisation interactive (voir Ressources).
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -2802,6 +2930,17 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - RabbitMQ image Docker (variables `_FILE` indisponibles ≥ 3.9) — https://hub.docker.com/_/rabbitmq
 - PostgreSQL 18 : nouveau layout des données (montage `/var/lib/postgresql`) — https://github.com/docker-library/postgres/pull/1259
 - Docker : contexte de build — https://docs.docker.com/build/concepts/context/
+
+### Swarm, Raft & consensus
+- Raft dans Swarm (gestion du quorum) — https://docs.docker.com/engine/swarm/raft/
+- Administrer un Swarm (HA des managers, quorum, nombre impair) — https://docs.docker.com/engine/swarm/admin_guide/
+- Nœuds Swarm (managers/workers) — https://docs.docker.com/engine/swarm/how-swarm-mode-works/nodes/
+- Raft (site officiel, papier) — https://raft.github.io/
+- Papier Raft (PDF) — https://raft.github.io/raft.pdf
+- Visualisation interactive de Raft — https://thesecretlivesofdata.com/raft/
+- SwarmKit (la lib derrière Swarm) — https://github.com/moby/swarmkit
+- gRPC — https://grpc.io/
+- Protocol Buffers — https://protobuf.dev/
 
 ### Docker Swarm
 - Vue d'ensemble Swarm — https://docs.docker.com/engine/swarm/
