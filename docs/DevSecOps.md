@@ -2719,6 +2719,113 @@ Pour *voir* Raft en action : la visualisation interactive (voir Ressources).
 
 ---
 
+## 29. Swarm sur AWS EC2 : le join qui échoue (Security Groups)
+
+**Date :** 2026-10-25
+
+### 29.1 Le vocabulaire AWS (ce qu'il faut comprendre)
+
+| Terme | Signification |
+|---|---|
+| **EC2** | Service de machines virtuelles. Une **instance** = une VM louée |
+| **AMI** | Modèle d'OS d'où part l'instance (≈ image Docker, mais pour une VM) |
+| **VPC** | Réseau privé isolé dans AWS où vivent tes instances (≈ ton réseau local) |
+| **Subnet** | Subdivision du VPC (souvent une par zone de disponibilité) |
+| **CIDR** (`172.31.0.0/16`) | Plage d'IP du VPC ; les instances reçoivent une IP dedans |
+| **IP privée** (`172.31.x.x`) | Joignable **dans** le VPC ; les nœuds Swarm s'en servent entre eux |
+| **IP publique** (`13.x.x.x`) | Joignable depuis Internet (SSH) ; **change au stop/start** sauf Elastic IP |
+| **ENI** | La carte réseau virtuelle de l'instance ; les SG s'y attachent |
+| **Security Group (SG)** | **Pare-feu virtuel** autour de l'instance : règles inbound/outbound |
+| **Key pair** | La clé SSH (`.pem`) associée à l'instance au lancement |
+| **Région / AZ** | Zone géographique / datacenter ; la HA répartit sur plusieurs AZ |
+
+### 29.2 Le problème
+
+`docker swarm join --token … <ip>:2377` → `Timeout was reached before node joined`, puis
+`docker info` montre :
+```
+Swarm: error
+  Error: rpc error: code = DeadlineExceeded ... while waiting for connections to become ready
+  Node Address: 172.31.7.80
+```
+
+**Lecture (méthode section 23) :** `DeadlineExceeded waiting for connections` = le worker a
+tenté d'ouvrir la connexion gRPC vers le manager sur **2377** mais n'y est **jamais arrivé**.
+Catégorie = **joignabilité réseau**. `Node Address: 172.31.7.80` = IP privée du VPC.
+
+### 29.3 La cause
+
+Le **Security Group** (pare-feu AWS) n'autorisait que le port **22** (SSH). Les ports Swarm
+étaient **bloqués** :
+
+| Port | Rôle | À ouvrir sur |
+|---|---|---|
+| **2377/TCP** | gestion du cluster (join) | les managers |
+| **7946/TCP+UDP** | découverte entre nœuds | tous |
+| **4789/UDP** | trafic overlay | tous |
+
+### 29.4 La correction — un SG dédié attaché à tous les nœuds
+
+Idée clé : une instance peut porter **plusieurs SG** (les règles **s'additionnent**). On crée
+**un** SG `swarm-cluster` et on l'attache aux 3 nœuds.
+
+1. **Créer le SG** : EC2 → Security Groups → Create → nom `swarm-cluster`, VPC par défaut.
+2. **Inbound rules** — 4 règles, Source = **le CIDR du VPC** `172.31.0.0/16` (= uniquement
+   les machines du VPC, pas Internet) :
+
+| Type | Port | Source |
+|---|---|---|
+| Custom TCP | 2377 | 172.31.0.0/16 |
+| Custom TCP | 7946 | 172.31.0.0/16 |
+| Custom UDP | 7946 | 172.31.0.0/16 |
+| Custom UDP | 4789 | 172.31.0.0/16 |
+
+   (Encore plus strict : Source = **ce SG lui-même** — mais impossible de se référencer
+   pendant la création ; à resserrer après coup.)
+3. **Outbound** : ne pas toucher. `All traffic → 0.0.0.0/0` est le **défaut** qui laisse
+   l'instance **initier** des connexions (pull d'images, worker→manager). L'enlever casse
+   le join et les pulls.
+4. **Attacher `swarm-cluster` aux 3 instances** : EC2 → Instances → Actions → Security →
+   Change security groups → ajouter `swarm-cluster` (garder le SG SSH). **À faire sur chaque
+   nœud** (le SG est par instance).
+
+### 29.5 Pourquoi Source = le VPC et pas `0.0.0.0/0`
+
+`0.0.0.0/0` = tout Internet. Le port **2377** donne le **contrôle du cluster** → jamais
+public (même logique que « ne jamais ouvrir 2375 »). Source = `172.31.0.0/16` = seules les
+machines **de ton VPC** se parlent sur ces ports.
+
+### 29.6 Notion clé : le SG est **stateful**
+
+Un Security Group est **à états** : quand une connexion **entrante** est autorisée, la
+**réponse** repart automatiquement (pas besoin d'ouvrir les deux sens). **Mais** toute
+connexion que l'instance **initie** (sortante) a besoin d'une règle **outbound**. D'où :
+supprimer l'outbound `All → 0.0.0.0/0` empêche les pulls d'images **et** le worker de
+contacter le manager. Avec plusieurs SG, c'est l'**union** des règles qui compte.
+
+### 29.7 Vérifier et rejoindre
+
+```bash
+# depuis le worker : le port est-il ouvert maintenant ?
+nc -zv 172.31.X.X 2377        # attendu : "... port [tcp/*] succeeded!"
+
+# le background a peut-être déjà fini le join (ports ouverts) :
+docker info | grep -i Swarm   # "active" = déjà rejoint, rien à faire
+
+# sinon, réinitialiser puis rejoindre :
+docker swarm leave --force
+docker swarm join --token <TOKEN-WORKER> 172.31.X.X:2377
+
+# sur le manager :
+docker node ls                # les 3 nœuds doivent être Ready
+```
+
+**`docker swarm leave --force`** : fait quitter le swarm et réinitialise le nœud. Sans lui,
+un re-`join` est refusé (`This node is already part of a swarm`). Inutile si `docker info`
+montre déjà `Swarm: active`.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -2897,10 +3004,16 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Kubernetes CSI (Container Storage Interface) — https://kubernetes-csi.github.io/docs/
 - Kubernetes : types de volumes — https://kubernetes.io/docs/concepts/storage/volumes/
 
-### Clés SSH & EC2
+### AWS (EC2, VPC, Security Groups)
 - `ssh-keygen` — https://man.openbsd.org/ssh-keygen
+- EC2 : concepts (instances, AMI) — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html
 - EC2 : paires de clés — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html
 - EC2 : Elastic IP (IP fixe) — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html
+- EC2 : interfaces réseau (ENI) — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html
+- VPC : qu'est-ce que c'est — https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html
+- VPC : blocs CIDR — https://docs.aws.amazon.com/vpc/latest/userguide/vpc-cidr-blocks.html
+- Security Groups (pare-feu, stateful, inbound/outbound) — https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html
+- Ports requis par Docker Swarm — https://docs.docker.com/engine/swarm/swarm-tutorial/
 
 ### Sockets & diagnostic réseau
 - `ss(8)` (sockets en écoute) — https://man7.org/linux/man-pages/man8/ss.8.html
