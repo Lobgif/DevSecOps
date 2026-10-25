@@ -2826,6 +2826,122 @@ montre déjà `Swarm: active`.
 
 ---
 
+## 30. Swarm `deploy` : replicated/global, HA stateful, placement, resources
+
+**Date :** 2026-10-25
+
+### 30.1 replicated vs global
+
+| | replicated (défaut) | global |
+|---|---|---|
+| Quoi | **N** instances placées n'importe où | **1 par nœud**, auto (nouveau nœud → une instance) |
+| Pour | stateless à scaler (api, web) | agents **par nœud** (monitoring, logs, parfois proxy) |
+
+Question à se poser : « ça doit tourner **sur chaque** nœud ? » → **global**. « Je veux juste
+N copies ? » → **replicated**. « C'est une base de données ? » → **replicated: 1** + placement.
+
+### 30.2 Qui a des replicas dans un vrai stack
+
+| Service | Type | Mode | Pourquoi |
+|---|---|---|---|
+| api, web | stateless | replicated (2-3) | copies interchangeables → scale/HA |
+| postgres | stateful | 1 replica + placement | 2 instances/même volume = corruption ; HA = réplication native |
+| redis | stateful | 1 (ou Sentinel/Cluster) | HA via clustering Redis |
+| rabbitmq | stateful | 1 (ou cluster 3 nœuds) | cluster configuré dans RabbitMQ |
+| minio | stateful | 1 (ou distribué 4+) | mode distribué MinIO |
+| node-exporter, cadvisor, agent logs | agent | **global** | collectent les données **de chaque** nœud |
+
+### 30.3 HA des services stateful = clustering natif, PAS des replicas Swarm
+
+`replicas: 3` = 3 copies **indépendantes** qui ne se connaissent pas, chacune ses données →
+incohérence/corruption. Le clustering exige que les instances **se coordonnent** → c'est une
+fonctionnalité **du logiciel**, pas de Swarm.
+
+| Logiciel | Mécanisme natif |
+|---|---|
+| **Postgres** | **streaming replication** (1 primary → N standbys ; failover). Outils : **Patroni**, repmgr, ou DB managée (RDS/Aurora) |
+| **Redis** | **Sentinel** (HA) ou **Redis Cluster** (sharding) |
+| **RabbitMQ** | **cluster** + **quorum queues** (qui utilisent Raft) |
+| **MinIO** | **mode distribué** (erasure coding sur 4+ nœuds), déclaré au lancement |
+
+→ Swarm replicas = **stateless uniquement**. Le stateful se cluster **dans le logiciel**, ou
+part sur un **service managé**.
+
+### 30.4 placement : où tourne une task
+
+```yaml
+placement:
+  constraints:                 # règles DURES : où la task A LE DROIT de tourner
+    - node.role == worker      # jamais sur les managers
+    - node.hostname == node-db # ÉPINGLER un stateful au nœud de son volume
+    - node.labels.disk == ssd  # matériel (label posé avec: docker node update --label-add)
+  preferences:                 # répartition SOUPLE
+    - spread: node.labels.zone # étaler sur les AZ
+  max_replicas_per_node: 1
+```
+
+⚠️ Le placement vaut pour **tout** service stateful à **volume local** (pas que la DB) : un
+volume local vit sur **un seul** nœud ; sans épinglage, une reprogrammation sur un autre nœud
+ne retrouve pas les données. Alternatives : stockage **partagé** (NFS/Ceph) ou clustering natif.
+
+### 30.5 update_config / rollback_config (rolling update)
+
+```yaml
+update_config:
+  parallelism: 1          # tasks mises à jour EN MÊME TEMPS (1 = prudent, 0 = toutes)
+  delay: 10s              # attente ENTRE chaque lot
+  order: start-first      # start-first = nouvelle avant d'arrêter l'ancienne (zéro coupure) ; stop-first = défaut
+  failure_action: rollback # si échec : continue / pause / rollback (retour auto)
+  monitor: 30s            # observer une task N s après maj ; plante dans ce délai = échec
+  max_failure_ratio: 0.2  # % d'échecs toléré avant failure_action
+rollback_config:          # mêmes champs, pour le retour arrière
+```
+
+### 30.6 resources : plafonds, réservations, et comment dimensionner
+
+```yaml
+resources:
+  limits:          # PLAFOND : dépassement mémoire → conteneur tué (OOM, 137)
+    cpus: "0.50"   # 0.50 = moitié d'UN coeur ("1.0" = un coeur entier)
+    memory: 512M
+    pids: 100      # max processus (anti fork-bomb)
+  reservations:    # MINIMUM GARANTI : le scheduler ne place que si le nœud a au moins ça de libre
+    cpus: "0.25"
+    memory: 256M
+```
+
+**Méthode pour fixer les valeurs :**
+1. **Capacité de la machine** :
+   ```bash
+   nproc ; free -h ; docker info | grep -E "CPUs|Total Memory"
+   ```
+2. **Conso réelle sous charge** :
+   ```bash
+   docker stats            # CPU% / MEM par conteneur
+   ```
+3. **Régler** : `reservations` ≈ conso typique ; `limits` ≈ pic + marge (≈ reservations × 1.5-2).
+4. **Ne pas sur-réserver** : somme des `reservations` d'un nœud ≤ capacité, en gardant 10-20%
+   pour l'OS + Docker.
+
+Règle : toujours mettre des **limits** en prod (un conteneur qui fuit ne doit pas tuer le nœud).
+Plus tard, Prometheus/Grafana donne l'historique pour affiner.
+
+### 30.7 Référence rapide de toutes les clés `deploy`
+
+| Clé | Rôle |
+|---|---|
+| `mode` | replicated / global / replicated-job / global-job |
+| `replicas` | nb d'instances (mode replicated) |
+| `endpoint_mode` | `vip` (IP virtuelle load-balancée) / `dnsrr` (DNS round-robin) |
+| `labels` | labels sur le **service** (ex. règles Traefik) |
+| `update_config` | déroulé des mises à jour (voir 30.5) |
+| `rollback_config` | déroulé des retours arrière |
+| `restart_policy` | relance d'une task qui sort (condition/delay/max_attempts/window) |
+| `placement` | constraints/preferences/max_replicas_per_node (voir 30.4) |
+| `resources` | limits/reservations (voir 30.6) |
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3043,6 +3159,17 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - RabbitMQ image Docker (variables `_FILE` indisponibles ≥ 3.9) — https://hub.docker.com/_/rabbitmq
 - PostgreSQL 18 : nouveau layout des données (montage `/var/lib/postgresql`) — https://github.com/docker-library/postgres/pull/1259
 - Docker : contexte de build — https://docs.docker.com/build/concepts/context/
+
+### Swarm deploy, HA & clustering stateful
+- Compose : section `deploy` (référence complète) — https://docs.docker.com/reference/compose-file/deploy/
+- Swarm : services (replicated/global, scaling) — https://docs.docker.com/engine/swarm/services/
+- `docker stats` (mesurer CPU/mémoire) — https://docs.docker.com/reference/cli/docker/container/stats/
+- PostgreSQL : haute disponibilité & réplication — https://www.postgresql.org/docs/current/high-availability.html
+- Patroni (HA Postgres automatisée) — https://patroni.readthedocs.io/en/latest/
+- Redis Sentinel — https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/
+- RabbitMQ : clustering — https://www.rabbitmq.com/docs/clustering
+- RabbitMQ : quorum queues — https://www.rabbitmq.com/docs/quorum-queues
+- MinIO : déploiement distribué (multi-nœuds) — https://min.io/docs/minio/linux/operations/install-deploy-manage/deploy-minio-multi-node-multi-drive.html
 
 ### Swarm, Raft & consensus
 - Raft dans Swarm (gestion du quorum) — https://docs.docker.com/engine/swarm/raft/
