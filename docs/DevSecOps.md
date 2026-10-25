@@ -2942,6 +2942,64 @@ Plus tard, Prometheus/Grafana donne l'historique pour affiner.
 
 ---
 
+## 31. Déployer un stack sur un vrai Swarm : la série d'erreurs
+
+**Date :** 2026-10-25
+
+Déployer avec `docker stack deploy` un fichier conçu pour `docker compose up` révèle que les
+deux n'ont **pas le même jeu de fonctionnalités**. Voici la chaîne d'erreurs rencontrée et
+corrigée, une par une (méthode : lire l'erreur exacte → corriger).
+
+### 31.1 La grille compose up ≠ stack deploy
+
+| Élément | `docker compose up` (1 hôte) | `docker stack deploy` (Swarm) |
+|---|---|---|
+| `name:` (top-level) | ✅ | ❌ **rejeté** (le nom vient de la CLI) |
+| `build:` | ✅ construit | ❌ ignoré → `image:` depuis un registre |
+| `pre_start` / hooks | ✅ | ❌ **rejeté** |
+| `depends_on` (condition) | ✅ attend | ❌ ignoré (l'app doit réessayer) |
+| `restart:` | ✅ | ❌ → `deploy.restart_policy` |
+| `container_name` | ✅ | ❌ ignoré |
+| réseau | `bridge` (local) | **`overlay`** (requis) |
+| secrets | `file:` lit le fichier local | souvent `external` + `docker secret create` |
+
+### 31.2 La chaîne d'erreurs (cause → correctif)
+
+| Erreur | Cause | Correctif |
+|---|---|---|
+| `additional property 'pre_start' is not allowed` | hook non supporté en Swarm | retirer `pre_start` → migrations en **job** (`mode: replicated-job`) |
+| `(root): additional property 'name' is not allowed` | `name:` interdit en stack | supprimer la ligne (nom = argument CLI) |
+| `secret not found: postgres_user` | les `.txt` sont gitignorés → **absents du nœud** où on déploie | `docker secret create` (externe) + `external: true`, ou recréer les fichiers sur le manager |
+| `network ... cannot be used with services ... overlay driver` | réseaux en `driver: bridge` | passer en **`driver: overlay`** |
+| overlay mis, mais **même** erreur | un réseau **bridge** nommé `jamakan_internal` **existait déjà** → réutilisé à cause du `name:` explicite | `docker network rm jamakan_internal jamakan_public` puis redéployer |
+| `error from registry: unauthorized` | images GHCR **privées** → les nœuds ne peuvent pas les tirer | `docker login ghcr.io` sur le manager **+** `docker stack deploy --with-registry-auth` (ou rendre les packages publics) |
+
+### 31.3 Les points clés
+
+- **Secrets externes en Swarm** : `printf 'valeur' | docker secret create nom -` sur le manager
+  (Raft store, chiffré, distribué), puis `external: true` dans le stack. Les secrets ne voyagent
+  pas avec git → ils n'existent pas sur le nœud après un simple `git clone`.
+- **Réseau nommé réutilisé** : donner un `name:` explicite fait **réutiliser** un réseau existant
+  **même si le driver ne correspond pas** → supprimer l'ancien avant de changer `bridge`→`overlay`.
+- **`--with-registry-auth`** : le manager transmet ses identifiants de registre aux nœuds pour
+  tirer les images **privées**. Sans lui, seul le manager est authentifié → les workers échouent.
+- **Migrations** : `pre_start` interdit en Swarm → service `migrate` en `mode: replicated-job`
+  (tourne une fois). `depends_on` ignoré → l'app doit réessayer, ou on lance le job d'abord.
+
+### 31.4 Piège connexe : fins de ligne CRLF/LF (WSL ↔ Windows)
+
+Un dépôt sur `/mnt/c` manipulé par **deux git** (WSL et Windows) aux réglages `core.autocrlf`
+différents fait apparaître **tous les fichiers comme « modified »** sans aucun vrai changement
+(CRLF côté Windows vs LF attendu côté WSL). Vérif : `git diff` est **vide** côté du git « propre ».
+
+**Fix machine-indépendant** — un `.gitattributes` à la racine :
+```
+* text=auto eol=lf
+```
+Puis `git add --renormalize . && git commit`, et rematérialiser l'arbre (`git rm -r --cached . && git reset --hard`). Le `.gitattributes` **force le LF partout**, quel que soit l'`autocrlf` de chaque machine. (Important aussi pour les scripts `.sh` : un CRLF casse le shebang → `bad interpreter`.)
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3159,6 +3217,14 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - RabbitMQ image Docker (variables `_FILE` indisponibles ≥ 3.9) — https://hub.docker.com/_/rabbitmq
 - PostgreSQL 18 : nouveau layout des données (montage `/var/lib/postgresql`) — https://github.com/docker-library/postgres/pull/1259
 - Docker : contexte de build — https://docs.docker.com/build/concepts/context/
+
+### Déployer un stack Swarm
+- `docker stack deploy` (référence CLI) — https://docs.docker.com/reference/cli/docker/stack/deploy/
+- Déployer une stack sur un Swarm (`--with-registry-auth`) — https://docs.docker.com/engine/swarm/stack-deploy/
+- Réseau overlay — https://docs.docker.com/engine/network/drivers/overlay/
+- Secrets Swarm — https://docs.docker.com/engine/swarm/secrets/
+- `.gitattributes` (fins de ligne) — https://git-scm.com/docs/gitattributes
+- GitHub : gérer les fins de ligne (CRLF/LF) — https://docs.github.com/en/get-started/git-basics/configuring-git-to-handle-line-endings
 
 ### Swarm deploy, HA & clustering stateful
 - Compose : section `deploy` (référence complète) — https://docs.docker.com/reference/compose-file/deploy/
