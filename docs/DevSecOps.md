@@ -3258,6 +3258,123 @@ empiler avec les autres, pas une fin en soi.
 
 ---
 
+## 35. Bonnes pratiques runtime : limiter ce qu'un conteneur compromis peut faire
+
+**Date :** 2026-11-01
+
+Ces réglages se posent **au lancement** du conteneur (pas dans l'image). Ils ne changent
+pas ce que fait l'appli ; ils **plafonnent les dégâts** si un process est compromis : écrire
+sur le disque, gagner des privilèges, épuiser les ressources. Chacun se teste par un **échec
+volontaire**, puis se règle au plus juste. Complément des couches des sections 32-34.
+
+### 35.1 `--read-only` : filesystem en lecture seule
+
+Gèle tout le système de fichiers → un attaquant ne peut plus **déposer** de malware ni modifier
+un binaire. On casse l'étape de **persistance**.
+
+Piège : une appli écrit quand même des fichiers légitimes (cache, PID, temp). On ne lève pas
+le read-only → on ouvre **au compte-gouttes** les seuls dossiers nécessaires en **tmpfs**
+(disque en RAM, éphémère). Méthode en 3 temps, observée sur `nginx:1.31.3-alpine` :
+
+1. `--read-only` seul → crash : `mkdir() "/var/cache/nginx/..." failed (Read-only file system)`
+2. + `/tmp` et `/var/cache/nginx` en tmpfs → échoue encore sur `/run/nginx.pid`
+3. + `/var/run` en tmpfs → démarre et répond ✅
+
+```bash
+docker run --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=100m \
+  --tmpfs /var/cache/nginx:rw,size=50m \
+  --tmpfs /var/run:rw,size=1m \
+  nginx:alpine
+```
+
+- `noexec,nosuid` sur `/tmp` : même inscriptible, on y interdit l'**exécution** et les binaires setuid.
+- Écrire ailleurs (ex. `/etc`) → `Read-only file system`. Contre-exemple : monter tout `/var` en
+  tmpfs « pour que ça marche » annule l'intérêt — ouvrir **le minimum**.
+
+Compose :
+```yaml
+services:
+  web:
+    image: nginx:alpine
+    read_only: true
+    tmpfs:
+      - /tmp:size=100m
+      - /var/cache/nginx
+      - /var/run
+```
+
+### 35.2 `no-new-privileges` : bloquer l'escalade par setuid
+
+**Binaire setuid** = exécutable qui tourne avec les droits de **son propriétaire** (ex. `sudo`,
+`passwd` → root), pas de celui qui le lance. C'est une voie classique d'escalade : un setuid-root
+vulnérable dans l'image → l'attaquant gagne root.
+
+`no-new-privileges` dit au noyau : ce process et ses enfants **ne pourront jamais obtenir plus de
+privilèges qu'au départ**. Le bit setuid est neutralisé. Preuve mesurable : `NoNewPrivs` dans
+`/proc/1/status` passe de `0` à `1`.
+
+```bash
+docker run --security-opt no-new-privileges:true myapp:1.0.0
+```
+
+- Contre-exemple / limite : casse une appli qui aurait *besoin* de setuid (rare — une image propre
+  n'en a pas besoin), donc le flag ne coûte rien.
+- Défaut global dans `daemon.json` :
+```json
+{ "no-new-privileges": true }
+```
+
+### 35.3 `--pids-limit` : contrer la fork bomb
+
+Plafonne le **nombre de process** du conteneur. Chaque `fork()` au-delà → refusé
+(`Resource temporarily unavailable`, EAGAIN).
+
+Une **fork bomb** (`:(){ :|:& };:`) se duplique à l'infini et sature la table des PID → **DoS de
+tout l'hôte**. `--pids-limit` confine : le conteneur sature **son** quota et s'arrête là, l'hôte
+et les autres conteneurs sont épargnés.
+
+Observé sur `nginx` (1 worker par cœur CPU) :
+- `--pids-limit 1` → `Cannot fork` : l'entrypoint ne peut même pas démarrer.
+- `--pids-limit 10` → démarre, mais `fork() failed while spawning "worker process"` : les workers
+  au-delà de 10 ne naissent pas (puis `sendmsg() failed` en cascade).
+- `--pids-limit 15` → assez de marge, tous les workers démarrent ✅.
+
+La bonne valeur dépend de l'appli **et** de la machine (nb de cœurs). Méthode :
+```bash
+docker top <conteneur> | wc -l     # compter les process réels sans limite
+# puis poser la limite = ce nombre × 1.5 à 2
+```
+
+Compose :
+```yaml
+services:
+  web:
+    image: nginx
+    pids_limit: 30
+```
+
+### 35.4 `--memory` / `--cpus` : épuisement RAM/CPU
+
+Même logique : un conteneur qui fuit en RAM ou sature le CPU ne doit pas affamer l'hôte.
+`--memory 256m` (le process est OOM-killed au-delà), `--cpus 1.5` (plafond CPU). En Swarm, voir
+`deploy.resources.limits` (section 30).
+
+### 35.5 À retenir
+
+| Réglage runtime | Contre quoi |
+|---|---|
+| `--read-only` + tmpfs | écriture de malware / persistance |
+| `no-new-privileges` | escalade via setuid |
+| `--pids-limit` | fork bomb / épuisement de process |
+| `--memory` / `--cpus` | épuisement RAM/CPU |
+
+Couches **complémentaires** à empiler avec capabilities/seccomp/LSM (sec. 32) et rootless/userns
+(sec. 33-34). Toutes répondent à la même question : « si ce conteneur est compromis, jusqu'où vont
+les dégâts ? » — on réduit le **blast radius**.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3311,6 +3428,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - tmpfs — https://docs.docker.com/engine/storage/tmpfs/
 - Capabilities du noyau et Docker — https://docs.docker.com/engine/security/#linux-kernel-capabilities
 - `--cap-add`, `--cap-drop`, `--privileged` — https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities
+- Contraintes de ressources (`--memory`, `--cpus`, `--pids-limit`) — https://docs.docker.com/engine/containers/resource_constraints/
+- Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
 - Profils seccomp pour Docker — https://docs.docker.com/engine/security/seccomp/
