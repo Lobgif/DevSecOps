@@ -3078,6 +3078,87 @@ sudo aa-status
 
 ---
 
+## 33. Rootless Docker : pourquoi, et rootful vs userns-remap vs rootless
+
+**Date :** 2026-11-01
+
+### 33.1 Le but : limiter le rayon de dégâts
+
+Docker **normal** tourne en **root** → si le démon est compromis, ou si un conteneur
+**s'évade**, ou via le socket (`docker` = root), l'attaquant obtient **root sur l'hôte**.
+
+Le **rootless** fait tourner le démon **ET** les conteneurs sous un **user non-privilégié** :
+le `root` **dans** le conteneur = **ton user** dehors (user namespaces). Donc une compromission
+ne donne **que** les droits de ton user, pas root sur l'hôte. C'est le **moindre privilège**
+appliqué à Docker lui-même.
+
+| | Rootful (défaut) | Rootless |
+|---|---|---|
+| Démon compromis / évasion | **root sur l'hôte** 💀 | juste **ton user** |
+| Rayon de dégâts | toute la machine | ce que ton user peut faire |
+
+Exemple : une évasion de conteneur en rootful → lecture de `/etc/shadow`, backdoor système.
+En rootless → l'attaquant est ton user non-privilégié → **contenu**.
+
+### 33.2 Les 3 modes
+
+| Mode | Le **démon** tourne en | `root` conteneur = `root` hôte ? | Compatibilité |
+|---|---|---|---|
+| **Rootful** (défaut) | **root** | **OUI** (danger) | maximale |
+| **userns-remap** | **root** | **NON** (root conteneur → UID non-privilégié hôte) | bonne — bon compromis |
+| **Rootless** | **ton user** | NON | la + sûre, la - compatible |
+
+- **Rootful** : tout en root. Simple, compatible, mais rayon de dégâts maximal.
+- **userns-remap** : le **démon reste root**, mais les **conteneurs** sont remappés (le root du
+  conteneur devient un UID non-privilégié sur l'hôte). Compromis intermédiaire : on garde la
+  compatibilité du démon root tout en isolant les conteneurs.
+- **Rootless** : **démon ET conteneurs** non-root. Le plus sûr, mais le moins compatible.
+
+### 33.3 Prérequis (rootless)
+
+- Paquet **`uidmap`** (fournit `newuidmap`/`newgidmap`).
+- **`/etc/subuid` et `/etc/subgid`** : une plage de **≥ 65 536** UIDs/GIDs subordonnés pour le
+  user (ex. `user:231072:65536`). Ces plages permettent, **dans** le user namespace, de mapper
+  le root du conteneur vers ton user et les autres UIDs vers la plage.
+- **Kernel 5.11+** et **délégation cgroup v2**.
+
+```bash
+sudo apt install -y uidmap dbus-user-session docker-ce-rootless-extras
+grep ^$(whoami): /etc/subuid /etc/subgid        # doit être non vide
+```
+
+### 33.4 Installer sans casser le Docker root existant
+
+Si un démon root tourne déjà (ex. avec un Swarm), **ne pas** le désactiver → utiliser `--force` :
+```bash
+dockerd-rootless-setuptool.sh install --force
+export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
+docker info     # Context: rootless, Security Options: rootless
+```
+
+Le rootless est un **démon séparé** : socket `/run/user/<uid>/docker.sock`, stockage
+`~/.local/share/docker` → les conteneurs/images/Swarm du Docker **root** n'y sont **pas**
+visibles. On bascule par **contexte** :
+```bash
+docker context use rootless     # parler au rootless
+docker context use default      # revenir au Docker root
+```
+
+### 33.5 Trade-offs et piège WSL
+
+- Rootless sacrifie de la compatibilité : ports < 1024, certains modes réseau, **limites de
+  ressources** (délégation cgroup v2 requise), Swarm/overlay plus délicats, perfs réseau moindres.
+- **WSL** : cgroup **hybride** → la délégation cgroup v2 peut manquer → rootless sans limites de
+  ressources, voire bancal. Le voir marcher se fait mieux sur une **vraie VM / EC2**.
+
+### 33.6 À retenir
+
+Comprendre le **pourquoi** (réduire le rayon de dégâts) et les **3 modes** compte plus que de
+l'installer en WSL. En prod, le durcissement passe par **userns-remap** (bon compromis) ou
+**rootless** (max sécurité), rarement par du rootful nu.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3104,7 +3185,9 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Pilote de logs `json-file` (rotation `max-size`, `max-file`) — https://docs.docker.com/engine/logging/drivers/json-file/
 - Mode rootless — https://docs.docker.com/engine/security/rootless/
 - userns-remap (remappage des user namespaces) — https://docs.docker.com/engine/security/userns-remap/
+- Rootless : mapping UID/GID — https://docs.docker.com/engine/security/rootless/uid-gid-mapping/
 - `user_namespaces(7)` — https://man7.org/linux/man-pages/man7/user_namespaces.7.html
+- `subuid(5)` / `subgid(5)` (plages subordonnées) — https://man7.org/linux/man-pages/man5/subuid.5.html
 - Surface d'attaque du démon Docker (groupe `docker` ≈ root) — https://docs.docker.com/engine/security/#docker-daemon-attack-surface
 - Docker et les pare-feu (contournement d'`ufw`) — https://docs.docker.com/engine/network/packet-filtering-firewalls/
 - Licence Docker Desktop (qui doit payer) — https://docs.docker.com/subscription/desktop-license/
