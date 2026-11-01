@@ -3159,6 +3159,105 @@ l'installer en WSL. En prod, le durcissement passe par **userns-remap** (bon com
 
 ---
 
+## 34. Rootless & userns-remap : limitations, quand les utiliser, et rollback
+
+**Date :** 2026-11-01
+
+Suite de la section 33, avec les **limitations concrètes**, le **cas des ports bas**, un
+**arbre de décision**, et la **procédure pour revenir en arrière** sans casser le Swarm.
+Illustré par une vraie session de TP (rootless + userns-remap installés, testés, puis annulés).
+
+### 34.1 Les limitations du rootless, avec exemples et contre-exemples
+
+| Limitation | Pourquoi | Exemple qui casse | Contre-exemple qui marche |
+|---|---|---|---|
+| **Ports < 1024** | Seul root peut écouter sous 1024. Le démon n'est pas root. | `-p 80:80` → échec | `-p 8080:80` → OK |
+| **Limites de ressources** | Besoin de la délégation **cgroup v2**. Sans elle, pas d'enforcement. | `--memory 256m` ignoré (cas **WSL**, cgroup hybride) | sur vraie VM cgroup v2 → `--memory` respecté |
+| **Overlay / Swarm** | Réseau overlay et routing mesh supposent des privilèges réseau. | `docker swarm init` + overlay → bancal | un seul hôte, réseau `bridge` → OK |
+| **AppArmor / SELinux** | Charger un profil LSM demande des droits que le user n'a pas. | profil AppArmor custom → non chargé | seccomp builtin → toujours actif |
+| **`--privileged` / périphériques** | Donner tout root ou un `/dev/*` suppose root sur l'hôte. | `--privileged`, `--device /dev/sda` → refusé | conteneur applicatif normal → OK |
+
+Le fil rouge : **rootless retire des pouvoirs root** → tout ce qui *exige* root sur l'hôte
+devient impossible. Pour une appli web classique (écoute sur un port haut, pas de device,
+pas de `--privileged`), aucune de ces limites ne gêne.
+
+### 34.2 Le cas des ports bas en détail
+
+Le noyau réserve les ports **< 1024** à root (`net.ipv4.ip_unprivileged_port_start = 1024`).
+Le démon rootless n'étant pas root, il ne peut pas publier dessus. **Trois sorties :**
+
+```bash
+# 1. Publier sur un port haut (le plus simple, recommandé)
+docker run -p 8080:80 nginx
+
+# 2. Donner la capability au binaire réseau du rootless
+sudo setcap cap_net_bind_service=ep $(which rootlesskit)
+# relancer le démon rootless ensuite
+
+# 3. Abaisser le seuil pour tout le système (le moins propre)
+sudo sysctl net.ipv4.ip_unprivileged_port_start=80
+```
+
+Préférer la **1** : on met un reverse-proxy / load-balancer devant, qui lui écoute sur 80/443.
+
+### 34.3 Quand utiliser rootless (arbre de décision)
+
+| Contexte | Choix |
+|---|---|
+| **Dev / poste perso** | Rootless → isolation sans risque pour l'hôte |
+| **CI/CD multi-tenant** (builds qui ne se font pas confiance) | Rootless → un build compromis ne touche pas l'hôte |
+| **Workloads sans ports privilégiés ni devices** | Rootless → aucune limite ne gêne |
+| **Besoin de compatibilité max** (Swarm, overlay, ports < 1024) | **userns-remap** → bon compromis |
+| **Prod critique** | **Empiler les couches** (seccomp + capabilities + AppArmor/SELinux + userns/rootless), et pour une vraie isolation : **Kubernetes + Kata Containers** (chaque pod dans une micro-VM) |
+
+Rootless **seul** ne suffit pas en prod critique : c'est **une** couche parmi les 4 (section 32),
+pas une solution magique.
+
+### 34.4 Revenir en arrière proprement
+
+Ordre : d'abord le **rootless** (démon séparé), puis **userns-remap** (réglage du rootful).
+
+**A. Désinstaller le rootless**
+```bash
+docker context use default                        # se rebrancher sur le rootful
+unset DOCKER_HOST                                 # enlever la variable dans le shell
+dockerd-rootless-setuptool.sh uninstall --force   # --force car le rootful tourne (garde-fou)
+loginctl disable-linger <user>                    # ne plus garder le service après déconnexion
+# retirer de ~/.bashrc les lignes export DOCKER_HOST / export PATH=/usr/bin si ajoutées
+/usr/bin/rootlesskit rm -rf ~/.local/share/docker # effacer les données (UID subordonnés → rootlesskit, pas rm simple)
+```
+
+**B. Annuler userns-remap (sur le rootful)**
+```bash
+sudo nano /etc/docker/daemon.json     # retirer la ligne "userns-remap": "dockremap"
+sudo systemctl restart docker
+```
+
+**C. Vérifier le retour à l'état propre**
+```bash
+docker node ls                                       # le Swarm réapparaît (Leader, Ready, Active)
+docker ps                                            # les conteneurs rootful sont de retour
+docker info --format 'sec={{.SecurityOptions}}'      # plus de name=userns ; il reste name=seccomp,profile=builtin
+```
+
+Points clés observés :
+- **`--force` sur l'uninstall** : l'outil refuse tant que le rootful tourne (protection anti-erreur).
+- **Le Swarm revient tout seul** : son état (`/var/lib/docker/swarm`) n'est jamais touché par le
+  remap ; il était seulement masqué pendant que le démon utilisait `/var/lib/docker/<uid>.<gid>/`.
+- **`name=seccomp,profile=builtin` reste** : ce n'est pas un reste de TP, c'est le profil seccomp
+  **par défaut** de Docker, toujours actif (la couche « gratuite » de la section 32).
+- Les conteneurs lancés **pendant** que userns était actif restent dans `/var/lib/docker/<uid>.<gid>/`
+  et ne reviennent pas : c'étaient des jetables, c'est voulu.
+
+### 34.5 À retenir
+
+Les limitations du rootless découlent toutes du même fait : **le démon n'est plus root**.
+Pour apprendre, on installe/teste/désinstalle **isolément** et on revient à un état connu
+(un seul démon rootful + Swarm). En prod, rootless ou userns-remap est **une couche** à
+empiler avec les autres, pas une fin en soi.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3184,6 +3283,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `docker inspect` (`--format`) — https://docs.docker.com/reference/cli/docker/inspect/
 - Pilote de logs `json-file` (rotation `max-size`, `max-file`) — https://docs.docker.com/engine/logging/drivers/json-file/
 - Mode rootless — https://docs.docker.com/engine/security/rootless/
+- Rootless : dépannage (limitations, ports, cgroup) — https://docs.docker.com/engine/security/rootless/troubleshoot/
+- Kata Containers (isolation par micro-VM) — https://katacontainers.io/
 - userns-remap (remappage des user namespaces) — https://docs.docker.com/engine/security/userns-remap/
 - Rootless : mapping UID/GID — https://docs.docker.com/engine/security/rootless/uid-gid-mapping/
 - `user_namespaces(7)` — https://man7.org/linux/man-pages/man7/user_namespaces.7.html
