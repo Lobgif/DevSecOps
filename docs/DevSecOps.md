@@ -3000,6 +3000,84 @@ Puis `git add --renormalize . && git commit`, et rematérialiser l'arbre (`git r
 
 ---
 
+## 32. Les 4 couches de sécurité Linux d'un conteneur
+
+**Date :** 2026-11-01
+
+Capabilities, seccomp, AppArmor et SELinux contrôlent chacun **un axe différent** et se
+**superposent** (défense en profondeur). Ils ne font **pas** la même chose.
+
+### 32.1 Les 4, par axe de contrôle
+
+| Mécanisme | Contrôle **quoi** | Granularité | Analogie |
+|---|---|---|---|
+| **Capabilities** | les **privilèges root** fractionnés | ~40 capabilities | des **badges** d'actions privilégiées |
+| **seccomp** | les **syscalls** autorisés | ~300 appels noyau | la **liste** des appels noyau permis |
+| **AppArmor** | accès par **chemin de fichier** | profil par programme | un **règlement** « quels fichiers/chemins » |
+| **SELinux** | accès par **étiquette** (type enforcement) | labels partout | **étiquettes** process/fichier + politique |
+
+- **Capabilities** : au lieu du root tout-ou-rien, on découpe son pouvoir
+  (`CAP_NET_BIND_SERVICE` = port <1024, `CAP_SYS_ADMIN` ≈ root…). Docker en droppe la plupart.
+- **seccomp** : filtre **quels syscalls** le process peut appeler (défaut : ~44 bloqués).
+- **AppArmor** : LSM (Linux Security Module) basé sur les **chemins** — surtout Ubuntu/Debian.
+- **SELinux** : l'**autre** LSM, basé sur des **étiquettes** (labels) — surtout RHEL/Fedora.
+
+### 32.2 Pourquoi les empiler (défense en profondeur)
+
+Une action doit passer **TOUTES** les couches :
+```
+le conteneur veut faire X
+   ├─ a-t-il la CAPABILITY ?        (capabilities)
+   ├─ le SYSCALL est-il permis ?    (seccomp)
+   └─ l'LSM autorise-t-il l'accès ? (AppArmor OU SELinux)
+```
+Si **une seule** refuse → bloqué. Même si une couche est contournée, les autres rattrapent.
+**Pourquoi** : aucune couche n'est parfaite ; les empiler réduit le risque qu'une faille
+unique suffise à compromettre l'hôte.
+
+### 32.3 AppArmor et SELinux sont **exclusifs**
+
+Une machine utilise **l'un OU l'autre**, jamais les deux :
+
+| OS | LSM actif |
+|---|---|
+| Ubuntu / Debian | **AppArmor** |
+| RHEL / Fedora / Rocky | **SELinux** |
+
+Capabilities et seccomp, eux, sont **toujours** là (fonctions natives du noyau).
+
+### 32.4 Ce qu'il faut vraiment faire (par priorité)
+
+| Mécanisme | Action pratique |
+|---|---|
+| **Capabilities** | ✅ le plus actionnable : `--cap-drop ALL` puis `--cap-add` le strict nécessaire |
+| **seccomp** | garder le **profil par défaut** (déjà bon) ; custom = cas sensibles/binaires Go-C |
+| **AppArmor / SELinux** | garder le profil **par défaut** (`docker-default`) ; custom = avancé (Projet 09) |
+
+```bash
+docker run --cap-drop ALL --cap-add NET_BIND_SERVICE nginx   # tout retirer, rajouter le minimum
+```
+
+### 32.5 Piège WSL : AppArmor absent
+
+Sur **WSL2** (noyau Microsoft), AppArmor n'est **pas** actif par défaut → `sudo aa-status`
+répond « apparmor not present » et le conteneur a un `AppArmorProfile` **vide**. Ce n'est pas
+une erreur : ces LSM dépendent du **noyau**, et le noyau WSL ne le charge pas (comme macvlan
+et le cgroups hybride). Capabilities et seccomp, eux, restent actifs en WSL.
+
+| | WSL2 | Vraie Ubuntu / EC2 Ubuntu |
+|---|---|---|
+| `aa-status` | apparmor not present | module loaded |
+| `AppArmorProfile` du conteneur | vide | `docker-default` |
+
+Vérifier :
+```bash
+docker inspect --format '{{.AppArmorProfile}}' <conteneur>
+sudo aa-status
+```
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3010,6 +3088,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 ### Guide suivi — Stéphane Robert (non officiel, fil conducteur de l'apprentissage)
 - Conteneurs — https://blog.stephane-robert.info/docs/conteneurs/
 - Concepts Docker — https://blog.stephane-robert.info/docs/conteneurs/moteurs-conteneurs/docker/concepts/
+- Sécurité Docker (capabilities, seccomp, AppArmor/SELinux) — https://www.stephane-robert.info/docs/conteneurs/moteurs-conteneurs/docker/securite/
 - asdf-vm — https://blog.stephane-robert.info/docs/outils/systeme/asdf-vm/
 - jq : traiter du JSON en ligne de commande — https://blog.stephane-robert.info/docs/admin-serveurs/linux/references/jq/
 - crane — https://blog.stephane-robert.info/docs/conteneurs/outils/crane/
@@ -3054,6 +3133,9 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - `seccomp(2)` — https://man7.org/linux/man-pages/man2/seccomp.2.html
 - Profils AppArmor pour Docker — https://docs.docker.com/engine/security/apparmor/
 - AppArmor (site officiel) — https://apparmor.net/
+- Sécurité Docker (vue d'ensemble : capabilities, seccomp, LSM) — https://docs.docker.com/engine/security/
+- `selinux(8)` — https://man7.org/linux/man-pages/man8/selinux.8.html
+- WSL : configuration du noyau (`wsl.conf`, LSM) — https://learn.microsoft.com/en-us/windows/wsl/wsl-config
 - `dockerd` (référence) — https://docs.docker.com/reference/cli/dockerd/
 - containerd (site officiel) — https://containerd.io/
 - runc — https://github.com/opencontainers/runc
