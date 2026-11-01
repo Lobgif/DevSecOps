@@ -3375,6 +3375,111 @@ les dégâts ? » — on réduit le **blast radius**.
 
 ---
 
+## 36. Audit CIS (docker-bench) : durcir le stack et prouver le avant/après
+
+**Date :** 2026-11-01
+
+Mise en pratique des sections 32-35 sur la vraie stack Swarm (api/web/db/redis/rabbitmq/minio).
+Boucle complète attendue d'un pipeline sécurisé : **auditer → durcir → ré-auditer → preuve chiffrée**.
+
+### 36.1 docker-bench-security
+
+Outil qui audite l'hôte Docker contre le **CIS Docker Benchmark** (référentiel de durcissement).
+Le nom `docker-bench-security` **nu n'est pas sur un registre** → soit on le construit, soit on
+lance le script, soit on utilise l'image officielle `docker/docker-bench-security` :
+
+```bash
+sudo sh docker-bench-security.sh
+```
+
+Le score n'est **pas sur 100** : **+1 par `[PASS]`, −1 par `[WARN]`**, 0 pour INFO/NOTE. Proche de 0
+= machine non durcie. L'intérêt n'est pas le chiffre mais la **liste d'actions**.
+
+### 36.2 Lire le rapport : bruit vs réel (contexte WSL)
+
+À ignorer (limites WSL / non applicable) : `blkio throttle`, `cgroup v1 deprecated`, beaucoup de
+`File not found` (WSL ne range pas Docker comme une distro systemd), AppArmor/SELinux absents,
+auditing hôte (auditd). À traiter : les checks runtime des sections 4-5-7 (user, read-only,
+limites, healthcheck, overlay chiffré, auto-lock).
+
+### 36.3 Ce qui a été appliqué au stack (et ce qui a été écarté)
+
+Appliqué (sûr, fort impact), via `deploy.resources` et clés container-level :
+
+```yaml
+    read_only: true            # api / web seulement (stateless)
+    tmpfs:
+      - /tmp:size=50m
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+          pids: 200            # en Swarm: sous deploy.resources.limits, PAS pids_limit
+        reservations:
+          memory: 256M
+```
+
+Pièges rencontrés :
+- **`pids_limit`** (niveau service) → **rejeté** par `stack deploy` : en Swarm c'est
+  `deploy.resources.limits.pids`.
+- **`security_opt`** (dont `no-new-privileges`) → **ignoré** par `stack deploy`
+  (`Ignoring unsupported options: security_opt`). Le vrai fix : `no-new-privileges: true` dans
+  **`/etc/docker/daemon.json`** (couvre tous les conteneurs, coche CIS 2.14).
+
+Écarté volontairement :
+- **`cap_drop: ALL`** : casserait les images officielles qui démarrent en root puis basculent
+  (besoin `CHOWN/SETUID/SETGID`). À faire par image, en testant.
+- **`user:` non-root** : pour **ses** images → `USER` dans le Dockerfile, pas dans le stack ;
+  les officielles gèrent déjà leur non-root.
+- **`read_only` sur le stateful** (db/redis/rabbitmq/minio) : ils écrivent leurs données.
+
+### 36.4 Fichier prod vs fichier dev (limites WSL)
+
+Deux incompatibilités WSL ont imposé un **`stack-dev.yaml`** distinct du `stack.yaml` cible :
+
+| Réglage | `stack.yaml` (prod/EC2) | `stack-dev.yaml` (local WSL) | Pourquoi |
+|---|---|---|---|
+| `node.role == worker` (api/web) | ✅ | ❌ retiré | WSL = 1 seul nœud (manager), aucun worker → `no suitable node` |
+| overlay `encrypted: "true"` | ✅ | ❌ retiré | overlay chiffré = IPSec/ESP, absent du noyau WSL → `network sandbox join failed` |
+
+Le durcissement (resources, read_only, pids) est **identique** dans les deux. Même logique que
+AppArmor/cgroup : certaines mesures ne se valident que sur une **vraie VM / EC2**.
+
+### 36.5 Autres pièges de déploiement observés
+
+- **Secret mal créé** : `printf "postgres_user" | docker secret create ppostgres_ser -` → nom
+  (`ppostgres_ser`) ET contenu (« postgres_user » littéral) faux. Le **nom** = l'étiquette
+  attendue par le stack, le **contenu** = la vraie valeur. Créer depuis fichier :
+  `docker secret create postgres_user ./secrets/postgres_user.txt` (et vérifier l'absence de `\n`).
+- **Réseau `ingress` supprimé** → `service needs ingress network` : le recréer
+  `docker network create --driver overlay --ingress ingress`.
+- **Conflit de subnet overlay** → `subnet sandbox join failed` : vérifier les plages avec
+  `docker network inspect ... {{.IPAM.Config}}`, recréer avec `--subnet` distinct si besoin.
+- **Swarm perdu après redémarrage WSL** (`not a swarm manager`) : l'IP `eth0` change en WSL →
+  `docker swarm init --advertise-addr eth0`, puis **recréer secrets + labels** (perdus avec le
+  Swarm). Réflexe : `docker node ls` avant tout déploiement.
+
+### 36.6 Le résultat : preuve avant/après
+
+| | Avant | Après |
+|---|---|---|
+| Score docker-bench | **-2** | **+12** |
+| 5.11 mémoire / 5.12 CPU / 5.29 pids | WARN | **PASS** |
+| 5.13 read-only (api/web) | WARN | **PASS** |
+| 2.14 / 5.26 no-new-privileges | — | PASS |
+
+WARN restants = **choix assumés** (stateful en R/W et root, overlay non chiffré en WSL) ou
+**durcissement hôte** hors périmètre conteneur (auditd). Savoir **justifier** chaque WARN restant
+vaut autant que le score.
+
+### 36.7 À retenir
+
+La valeur n'est pas « zéro WARN » (impossible et inutile) mais la **démarche** : auditer, durcir
+l'actionnable, ré-auditer, et **argumenter** ce qui reste. Le `-2 → 12` est la preuve concrète.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3429,6 +3534,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Capabilities du noyau et Docker — https://docs.docker.com/engine/security/#linux-kernel-capabilities
 - `--cap-add`, `--cap-drop`, `--privileged` — https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities
 - Contraintes de ressources (`--memory`, `--cpus`, `--pids-limit`) — https://docs.docker.com/engine/containers/resource_constraints/
+- Docker Bench for Security — https://github.com/docker/docker-bench-security
+- CIS Docker Benchmark — https://www.cisecurity.org/benchmark/docker
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
