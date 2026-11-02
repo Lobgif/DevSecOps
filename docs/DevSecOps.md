@@ -3679,6 +3679,118 @@ propre**. Preuve que l'architecture est bonne : secrets injectés au **runtime**
 
 ---
 
+## 41. Socket proxy Docker : exposer l'API sans donner le démon
+
+**Date :** 2026-11-02
+
+### 41.1 Pourquoi `:ro` ne protège pas
+
+`/var/run/docker.sock` est un **socket Unix** (type `s` dans `ls -l`), un **canal de
+communication** avec le démon qui tourne en **root**. Monter le socket = pouvoir envoyer des
+requêtes HTTP au démon → **contrôle total = root hôte**. Le flag `:ro` empêche seulement de
+**remplacer le fichier socket**, pas d'**envoyer des requêtes** à travers. Un `POST
+/containers/{id}/stop` passe par le **même canal** qu'un `GET`.
+
+Preuve : socket monté en `:ro` + `POST .../stop` → HTTP **204**, conteneur arrêté. `:ro` n'a
+rien bloqué. → **Règle : ne jamais monter `docker.sock` dans un conteneur applicatif.**
+
+### 41.2 Le principe du socket proxy
+
+Un conteneur **intermédiaire** qui :
+1. monte le **vrai** socket,
+2. expose un **endpoint filtré** (TCP, ex. `2375`),
+3. **n'autorise que** les appels de la liste blanche.
+
+Les outils parlent au **proxy** (`DOCKER_HOST=tcp://proxy:2375`), **jamais** au socket brut.
+
+### 41.3 Les permissions (Tecnativa : par section d'API)
+
+| Variable | Ouvre | Outils typiques |
+|---|---|---|
+| `CONTAINERS` | liste + inspection | **Dozzle, cAdvisor, ctop** (monitoring) |
+| `IMAGES` | liste des images | **Diun, What's Up Docker, Watchtower** (updates) |
+| `NETWORKS` | réseaux | **Traefik, nginx-proxy, caddy-docker-proxy** (découverte) |
+| `EVENTS` | flux d'évènements | **Traefik, autoheal, docker-gen** (temps réel) |
+| `INFO`/`VERSION`/`PING` | métadonnées + santé | **socle de TOUS** (connexion, health) |
+| `POST` | **écriture** (stop, create, exec…) | **Watchtower, autoheal, Portainer** ⚠️ |
+
+Règle d'or : **`POST=0`** autant que possible. Un outil de **surveillance** ne doit **jamais**
+avoir `POST`. L'auto-découverte (Traefik, Dozzle) n'utilise que des **`GET`** → le proxy est
+**transparent** pour la lecture, **mur** pour l'écriture → la découverte fonctionne **à
+l'identique** qu'avec le socket brut.
+
+### 41.4 Les outils
+
+- **Tecnativa/docker-socket-proxy** (HAProxy) : le plus répandu, filtrage **par section** via env.
+- **linuxserver/docker-socket-proxy** : fork LSIO, équivalent.
+- **wollomatic/socket-proxy** (Go) : filtrage **par méthode + regex de chemin**, mTLS, durci.
+- **CetusGuard** (Go) : allowlist **route par route**.
+
+### 41.5 Durcir le proxy (c'est le composant root-equivalent)
+
+Le proxy monte le vrai socket → on le traite comme critique :
+- **Réseau dédié interne** (`proxynet`), **aucun port publié** : `2375` ne doit **jamais** être
+  exposé sur l'hôte (sinon quiconque sur le réseau pilote le démon).
+- `read_only: true` + `cap_drop: [ALL]` + `security_opt: [no-new-privileges:true]`.
+  ⚠️ `read_only` casse HAProxy sans **tmpfs** pour ses zones runtime :
+  ```yaml
+  read_only: true
+  tmpfs: [/tmp, /run]     # /tmp = config générée, /run = pid/socket
+  ```
+  Piège vécu : `tmpfs: [/tmp/haproxy.cfg]` (chemin de **fichier**) → Docker crée un **dossier** →
+  `can't create /tmp/haproxy.cfg: Is a directory`. Un tmpfs/volume se monte sur un **dossier**,
+  jamais sur un fichier → ouvrir `/tmp`, pas `/tmp/haproxy.cfg`.
+- `cap_drop: [ALL]` est sûr ici : le proxy écoute sur **2375** (> 1024, pas de
+  `CAP_NET_BIND_SERVICE`) et accède au socket par **permissions fichier**, pas par capability.
+
+### 41.6 Un proxy par besoin (blast radius)
+
+Plutôt qu'**un** proxy partagé ouvert au maximum (ex. `POST=1` car Watchtower en a besoin → **tous**
+les outils héritent de `POST`), on met **un proxy par outil**, réglé au minimum. **Même image**,
+instanciée plusieurs fois avec des **env différentes** :
+```yaml
+proxy-dozzle:      { environment: [CONTAINERS=1, POST=0] }   # lecture seule
+proxy-watchtower:  { environment: [CONTAINERS=1, IMAGES=1, POST=1] }  # écriture, isolée
+```
+→ Dozzle compromis = accès à **son** proxy seulement (lecture) ; le `POST` reste **confiné** à
+l'outil qui en a besoin. Moindre privilège **par composant**.
+
+### 41.7 Socket proxy + userns-remap (pattern réel)
+
+userns-remap remappe le root du conteneur → **100000** → il **n'a plus accès** au socket
+(`root:docker 660`). Démos vécues : socket brut en userns → `curl` renvoie `000` ; proxy en
+userns → HAProxy renvoie `503` (`SC--`, connect `-1` = backend socket injoignable). **Ce n'est pas
+un bug : userns protège le socket.**
+
+Solution pro : **`userns_mode: "host"` sur le SEUL proxy** (il tourne en vrai root → accès socket),
+**tout le reste reste remappé**. Le proxy devient le seul point de confiance — d'où l'importance de
+le durcir (41.5). Alternatives : API Docker en **TCP + mTLS** (pas de socket monté), ou **rootless**
+(démon hors root), ou à l'échelle **Kubernetes** (pas de `docker.sock`, RBAC).
+
+### 41.8 Le lab validé
+
+Dozzle derrière un proxy Tecnativa durci (`userns_mode: host`, `read_only`, `cap_drop ALL`,
+`tmpfs`, `POST` absent, réseau interne) :
+- logs du proxy : `GET /containers/json?...lab=dozzle` → **200**, `GET /containers/<id>/json` →
+  **200**, flags `----` → Dozzle **découvre et observe** à travers le proxy, sans socket monté.
+- `POST /containers/<id>/stop` via le proxy → **403 Forbidden** (pas de `POST`), conteneur **reste
+  Up**. Contraste : socket brut (sans userns) → `204`, conteneur arrêté.
+
+### 41.9 La limite à connaître (info disclosure)
+
+Même en **lecture seule**, le proxy laisse voir **noms, labels, variables d'environnement,
+réseaux, montages**. Il réduit le risque de **contrôle**, pas de **lecture d'infos**. D'où :
+**jamais** de secret en clair dans une variable d'env de conteneur (toujours Swarm secrets +
+`_FILE`). Sinon un outil « lecture seule » le **révélerait**.
+
+### 41.10 À retenir
+
+Hiérarchie : **1)** ne pas monter le socket → **2)** rootless/userns (root conteneur ≠ root hôte)
+→ **3)** si un outil a besoin de l'API, **socket proxy en lecture stricte, durci, un par besoin**.
+Le proxy est pratique **et** dangereux : c'est un point root-equivalent qu'on confine au maximum.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3742,6 +3854,11 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - SOPS — https://github.com/getsops/sops
 - age (chiffrement) — https://github.com/FiloSottile/age
 - Trivy : scanner de secrets — https://trivy.dev/latest/docs/scanner/secret/
+- Docker Engine API (référence) — https://docs.docker.com/reference/api/engine/
+- Tecnativa/docker-socket-proxy — https://github.com/Tecnativa/docker-socket-proxy
+- wollomatic/socket-proxy (durci, regex/mTLS) — https://github.com/wollomatic/socket-proxy
+- CetusGuard (allowlist par route) — https://github.com/hectorm/cetusguard
+- Dozzle (visualiseur de logs) — https://dozzle.dev/
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
