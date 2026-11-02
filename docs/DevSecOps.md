@@ -3783,7 +3783,26 @@ réseaux, montages**. Il réduit le risque de **contrôle**, pas de **lecture d'
 **jamais** de secret en clair dans une variable d'env de conteneur (toujours Swarm secrets +
 `_FILE`). Sinon un outil « lecture seule » le **révélerait**.
 
-### 41.10 À retenir
+### 41.10 Piège : `DOCKER_HOST` ignoré par certains outils
+
+Pour qu'un outil passe par le proxy, il doit **respecter** `DOCKER_HOST=tcp://proxy:2375`.
+Certains ne le lisent **pas** : ils ouvrent `/var/run/docker.sock` **codé en dur**. Résultat →
+l'outil ignore la variable, cherche le socket local (non monté) → **échec**. (Dozzle, lui, respecte
+`DOCKER_HOST` : c'est pour ça que le lab marche.)
+
+Deux solutions de repli :
+
+| Cas | Que faire | Sécurité |
+|---|---|---|
+| L'outil respecte `DOCKER_HOST` | `DOCKER_HOST=tcp://proxy:2375` | ✅ passe par le proxy |
+| Il l'ignore mais a une **option `tcp://`** (ex. Traefik `providers.docker.endpoint`) | pointer **cette** option vers le proxy | ✅ passe par le proxy |
+| Il n'accepte **que** le socket monté | monter le socket + **`DOCKER_GID`** (fixe le GID du groupe `docker` pour que le process non-root puisse lire le socket) | ⚠️ **plus de filtrage** (socket brut) |
+
+Réflexe : **lire la doc de l'outil avant de l'intégrer**. Privilégier un outil qui accepte un
+endpoint **`tcp://`** (natif ou via sa propre config) — c'est ce qui rend le proxy réellement
+utilisable. La voie « socket monté + `DOCKER_GID` » sacrifie le filtrage, à éviter sauf obligation.
+
+### 41.11 À retenir
 
 Hiérarchie : **1)** ne pas monter le socket → **2)** rootless/userns (root conteneur ≠ root hôte)
 → **3)** si un outil a besoin de l'API, **socket proxy en lecture stricte, durci, un par besoin**.
