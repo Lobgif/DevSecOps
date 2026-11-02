@@ -3256,6 +3256,31 @@ Pour apprendre, on installe/teste/désinstalle **isolément** et on revient à u
 (un seul démon rootful + Swarm). En prod, rootless ou userns-remap est **une couche** à
 empiler avec les autres, pas une fin en soi.
 
+### 34.6 Correction (2026-11-02) : userns-remap MARCHE en WSL
+
+Contrairement à ce qui avait été supposé, **userns-remap fonctionne en WSL2** (le noyau
+supporte les user namespaces). Vérifié : `docker run alpine sleep 3600` puis `ps -o uid,cmd -C sleep`
+→ le process apparaît en **UID 100000** sur l'hôte, et docker-bench passe **2.9 en PASS**.
+
+Le vrai piège qui faisait échouer le démarrage (`uid_map: Invalid argument`,
+`SYNC_USERMAP_ACK`) : des **lignes dupliquées** dans `/etc/subuid` et `/etc/subgid` (le
+`echo ... | tee -a` lancé deux fois → plages chevauchantes → le noyau refuse le mapping).
+Correctif : `sudo sort -u /etc/subuid -o /etc/subuid` (idem subgid), puis restart.
+
+**Distinction importante** — toutes les mesures « WSL » ne se valent pas :
+| Mesure | Marche en WSL ? | Pourquoi |
+|---|---|---|
+| overlay chiffré | ❌ non | besoin d'IPSec/ESP, absent du noyau WSL |
+| AppArmor | ❌ non | LSM non compilé dans le noyau WSL |
+| **userns-remap** | ✅ **oui** | user namespaces supportés ; piège = doublons subuid |
+
+**Effet de bord à connaître** : userns-remap **déplace le data-root** vers
+`<data-root>/<uid>.<gid>/` (ex. `/var/lib/docker/100000.100000/`). Donc Swarm, volumes et
+conteneurs créés **sans** userns deviennent **invisibles** quand on l'active (ils sont dans
+`/var/lib/docker/` classique), et **réapparaissent** quand on le désactive. Rien n'est perdu :
+c'est juste un changement de sous-dossier. `data-root` dit **où** stocker, userns ajoute un
+**sous-dossier remappé** à cet endroit — les deux se cumulent.
+
 ---
 
 ## 35. Bonnes pratiques runtime : limiter ce qu'un conteneur compromis peut faire
@@ -3480,6 +3505,180 @@ l'actionnable, ré-auditer, et **argumenter** ce qui reste. Le `-2 → 12` est l
 
 ---
 
+## 37. Secrets de build (BuildKit `--mount=type=secret`)
+
+**Date :** 2026-11-02
+
+Problème : installer des paquets **privés** au build (registre interne, token) **sans** graver
+le secret dans l'image. `COPY pip.conf` → le token reste dans une couche = fuite. La solution :
+le secret est monté **seulement pendant le `RUN`**, jamais dans une couche finale.
+
+### 37.1 Les trois noms indépendants
+
+```
+# terminal
+docker build --secret id=pip_conf,src=./supp.txt -t img .
+# Dockerfile
+RUN --mount=type=secret,id=pip_conf,target=/etc/pip.conf pip install ...
+```
+
+| Nom | Rôle | Contrainte |
+|---|---|---|
+| `src=` | d'**où** vient le secret (fichier hôte, ou variable d'env si omis) | libre |
+| `id=` | le **lien** entre la commande et le Dockerfile | **identique des 2 côtés** |
+| `target=` | **où** le secret atterrit dans le conteneur | libre (défaut `/run/secrets/<id>`) |
+
+`src` et `target` n'ont **aucun** rapport : seul `id` fait le pont. `supp.txt` → `/etc/pip.conf`
+fonctionne car l'`id` correspond.
+
+### 37.2 target : automatique vs manuel
+
+Le `target` est libre, mais pour que le secret **serve** :
+- soit on le pose **là où l'outil lit tout seul** (`/etc/pip.conf` pour pip) → le **format** doit
+  être valide (pip.conf = INI avec `[global]`). Un contenu bidon (`test`) → `File contains no section headers`.
+- soit on le pose **où on veut** (ou défaut `/run/secrets/<id>`) et **on le lit soi-même** :
+  ```dockerfile
+  RUN --mount=type=secret,id=tok \
+      pip install ... --index-url "https://user:$(cat /run/secrets/tok)@pypi.interne/simple"
+  ```
+
+Même principe pour tous les gestionnaires :
+| Outil | Fichier | Chemin lu | Variable d'env |
+|---|---|---|---|
+| pip | `pip.conf` | `/etc/pip.conf` | `PIP_CONFIG_FILE` |
+| npm | `.npmrc` | `~/.npmrc` (home de l'user courant) | `${NPM_TOKEN}` dans `.npmrc` |
+| yarn | `.yarnrc.yml` | racine projet | `YARN_NPM_AUTH_TOKEN` |
+
+Piège npm : en non-root (`USER 1000`), npm lit le `.npmrc` du **home de 1000** (`/home/node`),
+pas `/root`. Monter sur `/root/.npmrc` → ignoré.
+
+### 37.3 Options du mount
+
+```
+--mount=type=secret,id=x,target=...,required=true,mode=0400,uid=1000,gid=1000
+```
+- `required=true` : le build **échoue** si le secret n'est **pas fourni** à la commande. Ne vérifie
+  **que** la présence, **pas** l'usage ni le bon `target`. ⚠️ Une couche **`CACHED`** saute la
+  vérif → pour tester, `--no-cache`.
+- `mode=0400` : lecture seule, propriétaire uniquement (le 1er `0` = aucun bit spécial setuid/setgid/sticky).
+- `uid`/`gid` : propriétaire du **fichier secret**. N'a d'effet **que** si un process **non-root**
+  doit le **lire** (secret root en 0400 → un UID 1000 ne peut pas lire → il faut `uid=1000`).
+  En build root, inutile.
+
+### 37.4 Pièges `USER` / `chown` observés
+
+- Il n'existe **pas** d'instruction `CHOWN` ni `CHMOD` en Dockerfile. `chown` est une commande
+  shell (dans un `RUN`, en **minuscules**) ; `--chown=` / `--chmod=` sont des **options** de `COPY`/`ADD`.
+- `-R` (majuscule) = récursif (dossier + contenu). `chown` sans `-R` ne change que le dossier.
+- `USER` ne vaut que pour les instructions **suivantes**. On fait les opérations root (`chown`,
+  installs) **avant**, puis on bascule `USER 1000`. Mettre `USER` après le `chown` est **voulu** :
+  seul root peut `chown` vers un autre user.
+- `EACCES mkdir /app/node_modules` en non-root = `/app` (créé par `WORKDIR` en root) appartient à
+  root → l'UID 1000 ne peut pas y écrire. Fix : `RUN chown -R 1000:1000 /app` avant `USER 1000`,
+  ou `COPY --chown=1000:1000`, ou installer en root et n'exécuter qu'en non-root.
+
+## 38. Signer ses images : cosign keyless
+
+**Date :** 2026-11-02
+
+Signer prouve **qui** a produit l'image et qu'elle n'a pas été altérée. Le mode **keyless**
+(sans clé à gérer) : une identité **éphémère** via OIDC, enregistrée dans un journal public (Rekor).
+
+### 38.1 Signer
+
+```bash
+cosign sign ghcr.io/<owner>/<image>@sha256:<digest>
+```
+⚠️ Signer le **digest**, pas le tag (`:dev`) : un tag peut être réécrit → la signature ne vaudrait
+plus rien. Le flow keyless ouvre un login OIDC (navigateur) → l'identité = l'**email** du compte
+utilisé (scope `openid email`).
+
+### 38.2 Identité et émetteur selon la source
+
+| Signé depuis… | Émetteur OIDC | Identité |
+|---|---|---|
+| **GitHub Actions** (but du projet 02) | `https://token.actions.githubusercontent.com` | `https://github.com/<owner>/<repo>/.github/workflows/<fichier>.yml@refs/heads/main` |
+| **PC/WSL** (keyless interactif) | le fournisseur de login (ex. `https://accounts.google.com`) | l'**email** |
+
+### 38.3 Vérifier
+
+On ne « devine » pas l'identité : on la **lit** sur la signature (regexp ouverte), puis on resserre.
+```bash
+cosign verify \
+  --certificate-identity-regexp ".*" \
+  --certificate-oidc-issuer-regexp ".*" \
+  ghcr.io/<owner>/<image>:<tag> | jq '.[0].optional | {Subject, Issuer}'
+```
+Puis vérification stricte :
+```bash
+cosign verify \
+  --certificate-identity "<email-ou-workflow>" \
+  --certificate-oidc-issuer "<issuer>" \
+  ghcr.io/<owner>/<image>:<tag>
+```
+`cosign verify` **exige** identité **et** émetteur (refuse de vérifier « à l'aveugle »).
+Voir la signature attachée : `cosign tree <image>` ou `oras discover <image>`.
+
+## 39. Chiffrer des secrets au repos : SOPS + age
+
+**Date :** 2026-11-02
+
+SOPS chiffre les **valeurs** d'un fichier structuré (JSON/YAML/ENV) en laissant les **clés**
+lisibles → on peut **versionner** le fichier chiffré dans git sans fuite.
+
+Erreur de départ : `config file not found ... no keys provided` = SOPS ne sait pas **avec quelle
+clé** chiffrer. Il faut lui fournir une clé, via `.sops.yaml` (`creation_rules`) **ou** en CLI.
+
+Flow **age** (simple, sans cloud) :
+```bash
+sudo apt-get install -y age
+mkdir -p ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt   # affiche la clé PUBLIQUE age1...
+```
+`.sops.yaml` à la racine :
+```yaml
+creation_rules:
+  - path_regex: \.(json|ya?ml|env)$
+    age: age1xxxxxxxx...   # clé PUBLIQUE
+```
+Chiffrer / déchiffrer (SOPS lit la clé privée dans `~/.config/sops/age/keys.txt`) :
+```bash
+sops -e -i secrets.json
+sops -d secrets.json
+```
+⚠️ La clé **privée** ne se commit **jamais**. Le fichier **chiffré**, lui, peut aller dans git.
+Fichier texte brut → mode binaire : `sops -e --input-type binary --output-type binary -i fichier`.
+
+## 40. Détecter les secrets gravés dans une image
+
+**Date :** 2026-11-02
+
+But : prouver qu'**aucun** secret n'a fuité dans l'artefact (les secrets doivent arriver au
+**runtime**, pas dans l'image).
+
+| Méthode | Ce qu'elle trouve | Fiabilité |
+|---|---|---|
+| `docker run img find / -name "*.env" ...` | fichiers secrets **évidents** | basique |
+| `docker history --no-trunc \| grep -iE 'key\|token...'` | couches/ENV contenant le mot | ⚠️ **bruité** |
+| `trivy image img --scanners secret` | **vrais** secrets (entropie + règles) | **fiable** |
+
+Piège du `grep` : il matche **tout** ce qui contient « key ». Ex. `ENV GPG_KEY=7169...` dans
+l'image python = l'**empreinte d'une clé GPG PUBLIQUE** (sert à vérifier la signature du source
+Python), **pas** un secret. Une empreinte/ID identifie une clé **publique** → publique par
+conception. `grep` crie au loup ; Trivy fait la différence.
+
+Lecture du rapport Trivy secret :
+- **`0`** = cible scannée et **propre** ; **`-`** = **non concernée** par ce scan (ex. lignes
+  `python-pkg` = inventaire des dépendances, pas des cibles secret).
+- **Aucune section de findings** = aucun secret trouvé. S'il y en avait, Trivy sortirait fichier +
+  ligne + type.
+
+Résultat sur l'image backend : `find` vide, `trivy --scanners secret` sans findings → **image
+propre**. Preuve que l'architecture est bonne : secrets injectés au **runtime** (Swarm `external`
++ `_FILE`), **jamais** gravés. C'est le principe du projet 08 appliqué dès le projet 02.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3536,6 +3735,13 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Contraintes de ressources (`--memory`, `--cpus`, `--pids-limit`) — https://docs.docker.com/engine/containers/resource_constraints/
 - Docker Bench for Security — https://github.com/docker/docker-bench-security
 - CIS Docker Benchmark — https://www.cisecurity.org/benchmark/docker
+- Secrets de build (BuildKit `--mount=type=secret`) — https://docs.docker.com/build/building/secrets/
+- `docker history` — https://docs.docker.com/reference/cli/docker/image/history/
+- Cosign : signer (keyless) — https://docs.sigstore.dev/cosign/signing/overview/
+- Cosign : vérifier — https://docs.sigstore.dev/cosign/verifying/verify/
+- SOPS — https://github.com/getsops/sops
+- age (chiffrement) — https://github.com/FiloSottile/age
+- Trivy : scanner de secrets — https://trivy.dev/latest/docs/scanner/secret/
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
