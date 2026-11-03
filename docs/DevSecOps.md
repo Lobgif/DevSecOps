@@ -3810,6 +3810,80 @@ Le proxy est pratique **et** dangereux : c'est un point root-equivalent qu'on co
 
 ---
 
+## 42. cgroups v1 vs v2, et le driver (cgroupfs vs systemd)
+
+**Date :** 2026-11-03
+
+### 42.1 Rappel : à quoi servent les cgroups
+
+Fonctionnalité du noyau Linux qui **limite et compte les ressources** (CPU, RAM, PIDs, I/O) par
+groupe de processus. C'est **elle** qui applique `--memory`, `--cpus`, `--pids-limit` (section 35).
+
+### 42.2 v1 vs v2
+
+| Aspect | **v1** (legacy) | **v2** (recommandé) |
+|---|---|---|
+| Architecture | **hiérarchies multiples** (une par contrôleur) | **hiérarchie unifiée** |
+| Accounting mémoire | moins précis | **plus précis + PSI** (pression CPU/RAM/IO) |
+| I/O | `blkio` (limité) | contrôleur `io` (fin) |
+| Rootless + limites | ❌ délégation absente | ✅ délégation OK |
+| Kubernetes | **maintenance mode** (K8s 1.31+) | **standard depuis 1.25** |
+| Statut | déprécié (retrait **pas avant mai 2029**) | actif |
+
+Les limites **basiques** (`--memory`/`--cpus`/`--pids-limit`) marchent sur **les deux**. v2 apporte
+surtout : accounting fin + PSI, limites en **rootless**, I/O propre, compatibilité **K8s moderne**.
+
+### 42.3 Détecter sa configuration
+
+```bash
+docker info | grep -i cgroup
+#  Cgroup Driver: cgroupfs
+#  Cgroup Version: 1
+mount | grep cgroup
+#  cgroup2 on /sys/fs/cgroup/unified type cgroup2         ← v2 montée...
+#  cgroup  on /sys/fs/cgroup/memory  type cgroup          ← ...mais contrôleurs en v1 = HYBRIDE
+```
+**Mode hybride** (cas WSL) : la v2 `unified` est montée **mais vide de contrôleurs** ; les vrais
+contrôleurs (cpu/memory/pids) sont en **v1** → Docker rapporte `Cgroup Version: 1`. D'où les
+warnings `No blkio throttle` et le rootless sans limites.
+
+### 42.4 Le driver (cgroupfs vs systemd)
+
+Le **driver** = la méthode par laquelle Docker **applique** les cgroups :
+
+| Driver | Qui gère | Quand |
+|---|---|---|
+| **`cgroupfs`** | Docker écrit **directement** dans `/sys/fs/cgroup` | défaut, simple (WSL sans systemd complet) |
+| **`systemd`** | Docker **délègue à systemd** | **recommandé** si l'hôte tourne sous systemd |
+
+Pourquoi `systemd` sur un vrai serveur : si l'hôte utilise systemd **et** que Docker écrit en direct
+(`cgroupfs`), **deux gestionnaires** touchent aux cgroups → incohérences possibles. Un seul chef =
+cohérent. **Kubernetes exige** que kubelet et le runtime utilisent **le même** driver (`systemd`),
+sinon instabilité. Réglage (`/etc/docker/daemon.json`) :
+```json
+{ "exec-opts": ["native.cgroupdriver=systemd"] }
+```
+
+### 42.5 Migrer : manuel ou automatique ?
+
+**Ni l'un ni l'autre côté Docker** — la version cgroup est fixée par **l'OS/le noyau au boot**,
+Docker utilise ce que l'hôte fournit.
+- **Distro moderne** (Ubuntu 22.04+, Debian 11+) → **déjà v2**, rien à faire.
+- **Vieux système** → paramètre noyau `systemd.unified_cgroup_hierarchy=1` (GRUB) + reboot.
+- **WSL** → hybride/v1 ; migration manuelle, parfois limitée par le noyau WSL.
+
+### 42.6 À retenir
+
+| | WSL (local) | EC2/K8s (cible) |
+|---|---|---|
+| Version | **v1** (hybride) | **v2** |
+| Driver | **cgroupfs** | **systemd** |
+
+En WSL, v1+cgroupfs **suffisent** pour Docker/Swarm basique → rien à changer. Le vrai terrain v2 +
+driver `systemd`, c'est **EC2/Kubernetes**, où ça devient nécessaire (rootless, K8s, accounting fin).
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3878,6 +3952,9 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - wollomatic/socket-proxy (durci, regex/mTLS) — https://github.com/wollomatic/socket-proxy
 - CetusGuard (allowlist par route) — https://github.com/hectorm/cetusguard
 - Dozzle (visualiseur de logs) — https://dozzle.dev/
+- cgroups v2 (doc noyau) — https://docs.kernel.org/admin-guide/cgroup-v2.html
+- Docker : métriques runtime / cgroups — https://docs.docker.com/engine/containers/runmetrics/
+- Kubernetes : drivers cgroup (cgroupfs vs systemd) — https://kubernetes.io/docs/setup/production-environment/container-runtimes/
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
