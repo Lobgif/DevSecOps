@@ -4023,6 +4023,70 @@ QEMU reste plus simple pour démarrer.
 
 ---
 
+## 45. Où placer les contrôles dans la CI/CD (ordre + schéma)
+
+**Date :** 2026-11-04
+
+### 45.1 Le principe : chaque contrôle consomme le précédent
+
+L'ordre n'est **pas** arbitraire :
+- Le **SBOM** se génère au build et **ne bloque jamais** → il **documente** (inventaire des composants).
+- Le **scan** est le **1er point de décision** → il **refuse** une image vulnérable.
+- La **signature** ne s'applique qu'à une image **déjà validée** (sinon on authentifierait du code défaillant).
+- La **provenance SLSA** dit **comment** l'image a été construite (source, Dockerfile, runner).
+- La **vérification au déploiement** **ferme la boucle** (refuse d'exécuter une image non conforme).
+
+### 45.2 Le schéma du pipeline
+
+```mermaid
+flowchart TD
+    A[Build image] --> B["SBOM (Syft)<br/>documente, ne bloque pas"]
+    A --> C{"Scan CVE<br/>Grype / Trivy + VEX"}
+    C -->|CRITICAL / HIGH| X[Échec : image refusée]
+    C -->|OK| D["Push par digest"]
+    D --> E["Provenance SLSA<br/>+ Signature cosign<br/>+ SBOM attesté"]
+    E --> F{"Vérif au déploiement<br/>cosign / Kyverno-OPA"}
+    F -->|non conforme| Y[Déploiement refusé]
+    F -->|signée + conforme| G["Déploiement par digest"]
+```
+
+Ordre canonique : **Build → SBOM → Scan → Sign → Policy → Deploy**.
+
+### 45.3 Les 8 points à retenir
+
+1. **SBOM à chaque build** : inventaire exhaustif, de plus en plus **exigé par la réglementation**.
+2. **Scanner avant de signer et de promouvoir** : détecte les CVE connues (Grype pour un nouveau
+   pipeline, Trivy ≥ 0.72.0 épinglé) ; **filtrer avec VEX** réduit le bruit (exploitabilité réelle).
+3. **Signer l'image validée** : prouve origine + intégrité (Cosign/Sigstore) ; une **provenance SLSA**
+   dit en plus **comment** elle a été construite.
+4. **Reconnaître la vérification au déploiement** : une policy **Kyverno/OPA** bloque les images non
+   conformes (côté Kubernetes).
+5. **Déployer par digest** : le tag est **mutable**, le digest est **immuable**.
+6. **Utiliser des base images approuvées** : Official Images ou images durcies.
+7. **Pipeline** : Build → SBOM → Scan → Sign → Policy → Deploy.
+8. **Progressivité** : **alerter d'abord, bloquer ensuite** (on n'active pas un gate strict d'un coup
+   sur un pipeline existant → on observe, puis on durcit).
+
+### 45.4 Correspondance avec mon pipeline (projet 00 / 02)
+
+| Contrôle | Où, chez moi |
+|---|---|
+| Scan (gate) | `grype --fail-on critical` + Docker Scout, **avant** push |
+| Signature | `cosign sign` keyless, **après** le scan, **par digest** |
+| Provenance | `actions/attest-build-provenance` (`push-to-registry: true`) |
+| SBOM | `syft` + `cosign attest --type cyclonedx` (documente + attesté) |
+| **Vérif au déploiement** | **hors du workflow de publication** → `cosign verify` bloquant au déploiement Swarm, ou **Kyverno** en admission K8s (**projet 09**) |
+
+La CI couvre tout le **côté build** ; la **boucle se ferme au déploiement** (verify Swarm ou admission controller). C'est normal : un workflow de **publication** ne déploie pas.
+
+### 45.5 À retenir
+
+L'ordre encode une logique de **confiance croissante** : on documente (SBOM), on **décide** (scan), on
+**atteste** (sign + provenance) une image **déjà jugée saine**, puis on **refuse à l'exécution** tout
+ce qui n'est pas conforme. Et on applique chaque gate en **progressivité** (alerter → bloquer).
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -4097,6 +4161,10 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Profil seccomp par défaut (containerd, source à jour) — https://github.com/containerd/containerd/blob/main/contrib/seccomp/seccomp_default.go
 - Builds multi-plateforme en CI (GitHub Actions) — https://docs.docker.com/build/ci/github-actions/multi-platform/
 - `docker buildx imagetools create` (fusion de manifests) — https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/
+- SLSA (niveaux de provenance) — https://slsa.dev/
+- GitHub : artifact attestations (provenance) — https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds
+- Trivy : VEX (exploitabilité réelle) — https://trivy.dev/docs/latest/supply-chain/vex/
+- Kyverno (policies admission K8s) — https://kyverno.io/docs/
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
