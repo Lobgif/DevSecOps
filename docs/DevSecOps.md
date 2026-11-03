@@ -3969,6 +3969,56 @@ qu'on peut **durcir par appli** via `strace` — jamais réécrire de zéro, jam
 
 ---
 
+## 44. Builds multi-arch : QEMU vs runners natifs
+
+**Date :** 2026-11-03
+
+### 44.1 Image multi-arch = un tag, plusieurs CPU
+
+Une **seule** image (ex. `app:dev`) qui marche sur **amd64** (x86) **et** **arm64** (Mac M1/M2,
+AWS Graviton, Raspberry Pi). Techniquement c'est un **manifest list** : un index pointant vers **une
+image par architecture**. Au `docker pull`, Docker choisit **automatiquement** la bonne.
+
+### 44.2 Le défaut : émulation QEMU (lente)
+
+`buildx` construit le multi-arch sur **une seule** machine (souvent amd64) en **émulant** les autres
+CPU via **QEMU** : pour l'image arm64 sur un runner amd64, QEMU **simule** le processeur ARM
+instruction par instruction. Ça marche, mais chaque compilation (extensions C Python, `cgo` Go, `npm`
+natif…) tourne dans un CPU simulé → **5 à 20× plus lent** sur les gros builds.
+
+### 44.3 La solution : matrice de runners natifs + fusion
+
+```
+Job amd64 (runner amd64) → build NATIF → push app@sha256:AAA
+Job arm64 (runner arm64) → build NATIF → push app@sha256:BBB
+        └──────── Job de fusion ────────┘
+           docker buildx imagetools create -t app:dev app@sha256:AAA app@sha256:BBB
+```
+1. **Matrice** : un job **par architecture** (lancés en parallèle), chacun sur un runner de **son**
+   CPU → build **natif**, zéro émulation.
+2. Chaque job **pousse par digest** (pas par tag, pour ne pas s'écraser).
+3. Un job final **fusionne** les digests en **un manifest** sous `app:dev` avec
+   `docker buildx imagetools create`.
+
+### 44.4 Le compromis
+
+| Approche | Vitesse | Complexité | Quand |
+|---|---|---|---|
+| **QEMU** (`buildx --platform`) | lente | simple (1 job) | petits builds, peu de compilation |
+| **Matrice native + fusion** | rapide | plus complexe (jobs + digests + merge) | gros builds, compilation lourde |
+
+Runners ARM64 : GitHub-hosted (selon **plan** : gratuits sur repos publics, limités sinon) ou
+**self-hosted** / AWS Graviton.
+
+### 44.5 À retenir
+
+Multi-arch = une image pour amd64 **et** arm64. Par défaut buildx **émule** (QEMU, lent) ; pour aller
+vite → **un runner natif par arch** (matrice) + **fusion** via `docker buildx imagetools create`.
+On optimise **quand** l'émulation coûte trop cher (build backend avec extensions C), **pas avant** —
+QEMU reste plus simple pour démarrer.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -4041,6 +4091,8 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Docker : métriques runtime / cgroups — https://docs.docker.com/engine/containers/runmetrics/
 - Kubernetes : drivers cgroup (cgroupfs vs systemd) — https://kubernetes.io/docs/setup/production-environment/container-runtimes/
 - Profil seccomp par défaut (containerd, source à jour) — https://github.com/containerd/containerd/blob/main/contrib/seccomp/seccomp_default.go
+- Builds multi-plateforme en CI (GitHub Actions) — https://docs.docker.com/build/ci/github-actions/multi-platform/
+- `docker buildx imagetools create` (fusion de manifests) — https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
