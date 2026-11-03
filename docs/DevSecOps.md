@@ -3884,6 +3884,91 @@ driver `systemd`, c'est **EC2/Kubernetes**, où ça devient nécessaire (rootles
 
 ---
 
+## 43. Seccomp : filtrer les appels système
+
+**Date :** 2026-11-03
+
+### 43.1 Seccomp vs capabilities (axes différents)
+
+Les deux durcissent, mais sur **des plans différents** — nuance clé :
+
+| | **Capabilities** | **Seccomp** |
+|---|---|---|
+| Filtre | **quelles opérations privilégiées** (CHOWN, NET_RAW…) | **quels syscalls** tout court (reboot, ptrace, mount…) |
+| Question | « ai-je le droit de faire cette op root ? » | « ai-je le droit d'appeler ce syscall ? » |
+
+Complémentaires : même avec une capability, seccomp peut bloquer le syscall (et inversement).
+**Deux verrous indépendants.**
+
+### 43.2 Le profil par défaut = allowlist (deny-by-default)
+
+Le profil Docker par défaut **autorise ~300+ syscalls** et en **bloque ~44**. Techniquement :
+```json
+"defaultAction": "SCMP_ACT_ERRNO"   // par défaut : REFUSER
+// + une grande liste en SCMP_ACT_ALLOW
+```
+Un syscall refusé → le noyau renvoie `EPERM`/`EACCES`. Exemples bloqués : `reboot` (impact hôte),
+`mount`/`pivot_root` (évasion conteneur), `ptrace` (injection de code), `kexec_load` (prise de
+contrôle), `bpf` (modif kernel), `add_key`/`keyctl` (accès keyring), `swapon`/`swapoff`.
+
+### 43.3 Les actions SCMP
+
+| Action | Effet |
+|---|---|
+| `SCMP_ACT_ALLOW` | autorise |
+| `SCMP_ACT_ERRNO` | refuse + erreur (le défaut) |
+| `SCMP_ACT_KILL` | **tue** le process |
+| `SCMP_ACT_LOG` | autorise mais **journalise** (audit) |
+| `SCMP_ACT_TRACE` | passe la main à un traceur |
+
+### 43.4 Commandes
+
+```bash
+docker run alpine                                        # profil par défaut (implicite)
+docker inspect --format '{{.HostConfig.SecurityOpt}}' c  # voir le profil
+docker run --security-opt seccomp=/chemin/profile.json a # profil custom
+docker run --security-opt seccomp=unconfined alpine      # AUCUN filtre (debug SEULEMENT)
+```
+`seccomp=unconfined` désactive **tout** le filtrage → jamais en prod.
+
+### 43.5 Créer un profil custom : durcir, pas réécrire
+
+⚠️ Un profil minimal (`read`/`write`/`exit` seuls) **casse quasiment toute appli** (pas d'`open`,
+`mmap`, `socket`, `clone`…). La bonne méthode :
+1. Partir du **profil par défaut** comme base.
+2. **Observer** les syscalls réels de l'appli (`strace`, ou `SCMP_ACT_LOG` + journaux).
+3. **Retirer** de l'allowlist ce qui n'est pas utilisé → profil restrictif **mais fonctionnel**.
+
+On **durcit le défaut**, on ne part jamais d'une page blanche.
+
+### 43.6 Où vit le profil par défaut (chemin à jour)
+
+Le guide (et beaucoup de docs) pointent `moby/moby` → `profiles/seccomp/default.json`. **Ce chemin
+est périmé (404)** : le projet a migré le profil **de JSON vers Go**. Source canonique aujourd'hui,
+côté **containerd** (le runtime que Docker utilise) :
+```
+containerd/containerd → contrib/seccomp/seccomp_default.go
+```
+Pour un **JSON éditable** comme base, le prendre sur un **tag moby** où il existait encore :
+```bash
+curl -sSL -o seccomp-default.json \
+  https://raw.githubusercontent.com/moby/moby/v24.0.9/profiles/seccomp/default.json
+```
+Leçon : les chemins GitHub des gros projets **bougent** — ne pas se fier à un lien figé.
+
+### 43.7 WSL
+
+Seccomp **fonctionne en WSL** (contrairement à AppArmor). L'audit docker-bench le confirme :
+`name=seccomp,profile=builtin`. Cette couche est donc **active gratuitement** en local.
+
+### 43.8 À retenir
+
+Seccomp coupe des **syscalls entiers** dangereux (`ptrace`, `mount`, `kexec_load`…), là où les
+capabilities coupent des **pouvoirs root**. C'est une des 4 couches (sec. 32), **active par défaut**,
+qu'on peut **durcir par appli** via `strace` — jamais réécrire de zéro, jamais `unconfined` en prod.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -3955,6 +4040,7 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - cgroups v2 (doc noyau) — https://docs.kernel.org/admin-guide/cgroup-v2.html
 - Docker : métriques runtime / cgroups — https://docs.docker.com/engine/containers/runmetrics/
 - Kubernetes : drivers cgroup (cgroupfs vs systemd) — https://kubernetes.io/docs/setup/production-environment/container-runtimes/
+- Profil seccomp par défaut (containerd, source à jour) — https://github.com/containerd/containerd/blob/main/contrib/seccomp/seccomp_default.go
 - Référence `docker run` (`--read-only`, `--tmpfs`, `--security-opt`) — https://docs.docker.com/reference/cli/docker/container/run/
 - `capabilities(7)` — https://man7.org/linux/man-pages/man7/capabilities.7.html
 - `chroot(1)` — https://man7.org/linux/man-pages/man1/chroot.1.html
