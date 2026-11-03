@@ -3,6 +3,10 @@
 Tout ce que j'apprends et pratique **en dehors du projet FleetTrack** : outils, commandes, options, et
 surtout le **pourquoi**. Tenu au fil de l'eau.
 
+> **Rattachement au portfolio :** ce journal correspond au **Projet 00 — Socle : Linux + Docker +
+> Réseau + AWS** (Phase 1) du parcours `devsecops-portfolio` (code dans `00-docker/`). Il consigne
+> les fondations conteneur/OS/réseau/cloud avant l'automatisation (Ansible, CI/CD, K8s…).
+
 > **Règle de rangement**
 > - Par défaut, ce que je fais va **ici** (`docs/DevSecOps.md`).
 > - Quand un message commence par **« projet : … »**, ça concerne FleetTrack et va dans
