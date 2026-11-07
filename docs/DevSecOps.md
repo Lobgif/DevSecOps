@@ -4087,6 +4087,126 @@ ce qui n'est pas conforme. Et on applique chaque gate en **progressivité** (ale
 
 ---
 
+## 46. Pipeline CI consolidé : choix et décisions
+
+**Date :** 2026-11-07
+
+Consolidation de 4 workflows (bake, kaniko, docker-publish, promote) en **un seul**
+`build-sign-publish.yml` pour le projet 02.
+
+### 46.1 Moteur de build : build-push-action (matrice), pas kaniko
+
+| Moteur | Verdict |
+|---|---|
+| **build-push-action** (BuildKit) | **choisi** : multi-arch natif, sécurité (provenance/SBOM), cache |
+| **bake** | gardé pour le **build local** (`docker-bake.hcl`, plusieurs targets) |
+| **kaniko** | **écarté** : son seul atout (sans démon) est inutile sur runner GitHub ; faible en multi-arch/cache. Réservé **K8s**. |
+
+→ **Matrice** `component: [backend, frontend]` : chaque image buildée **en parallèle**, sécurité **par image**.
+
+### 46.2 Multi-arch + QEMU + scan par digest
+
+- **Multi-arch** sur un runner amd64 → besoin de **QEMU** (`setup-qemu-action`) pour émuler arm64.
+  Alternative sans QEMU : **runners natifs par arch + fusion** (section 44).
+- **On ne peut PAS `load` une image multi-arch** dans le démon local (le démon = une seule arch).
+  **MAIS** ce n'est **pas** un problème pour le scan : Grype/Trivy scannent **depuis le registre, par
+  digest** (ils tirent les couches) — `load` n'a rien à voir avec le pipeline.
+- Conséquence réelle : le **gate Grype est APRÈS le push** (on scanne l'image poussée par digest). Si
+  CVE critique → job rouge, image poussée mais **non signée/promue**.
+- Nuance : scanner un **index** multi-arch par digest scanne **une** plateforme par défaut (amd64,
+  celle du runner) ; pour couvrir arm64, `--platform` ou scan par arch.
+- Le **digest** récupéré (crane) = celui de l'**index (manifest list)** → `cosign sign` signe l'index =
+  **toutes** les arches d'un coup.
+
+### 46.3 Build sur `dev` + promotion (pas de rebuild par env)
+
+- **Build uniquement sur `push: dev`** → évite de lancer la CI sur chaque branche.
+- **Promotion** `dev → qa/staging/prod` via **`workflow_dispatch`** + `skopeo copy --all
+  --preserve-digests` = **copie** de l'image (par digest, multi-arch) **sans rebuild**.
+- Les deux dans **un fichier**, séparés par l'événement :
+  `if: github.event_name == 'push'` (build) / `== 'workflow_dispatch'` (promote).
+
+### 46.4 Validation sur PR (PR valide, push publie)
+
+```yaml
+on:
+  push: { branches: [dev] }
+  pull_request: { branches: [dev] }
+  workflow_dispatch: { ... }
+```
+- **PR vers dev** → build **amd64** + `load` + **Grype** (gate) → valide **sans** publier
+  (étapes publish/sign/attest conditionnées à `if: github.event_name == 'push'`).
+- **push dev** → build multi-arch + push + sign + SBOM + provenance.
+- (GitHub = PR ; **GitLab = Merge Request** → nécessiterait un `.gitlab-ci.yml` séparé.)
+
+### 46.5 Cache : par image, pas global
+
+Backend (python) et frontend (node) **ne partagent aucune couche** → un cache **global** n'apporte
+rien **et** provoque une **course** en matrice parallèle (deux jobs écrivant le même ref → cache
+corrompu). Donc **cache par image**, regroupé dans un package dédié **`cache`** avec un **tag par
+composant** (`cache:backend`, `cache:frontend`) → nom clair + séparation. Fini le package `app` fantôme.
+
+### 46.6 Lier l'image au dépôt (GHCR)
+
+`LABEL org.opencontainers.image.source=https://github.com/<owner>/<repo>` dans le Dockerfile → GHCR
+lie le package au dépôt (README, visibilité). Le **namespace** image/dépôt doit correspondre.
+
+## 47. Nettoyer un co-auteur de l'historique Git
+
+**Date :** 2026-11-07
+
+Problème : un trailer `Co-Authored-By: ... <noreply@...>` dans les messages de commit fait apparaître
+un **contributeur** supplémentaire (GitHub lit ce trailer).
+
+- **Le retirer du passé = réécrire l'historique** (les SHA changent) → **force-push obligatoire**.
+  Un **merge/MR n'efface rien** (il ajoute) ; supprimer+recréer la branche = même écrasement.
+- Commande (retire le trailer de tous les commits) :
+  ```bash
+  git filter-branch -f --msg-filter 'sed "/Co-Authored-By:.*anthropic/d"' -- --all
+  git for-each-ref --format='delete %(refname)' refs/original | git update-ref --stdin   # nettoie les backups
+  git push --force <remote> <branche>
+  ```
+- ⚠️ Vérifier **sans** `refs/original` (le backup fausse un `git log --all --grep`).
+- ⚠️ **Branches protégées** (vu sur GitLab) → force-push **refusé**. Il faut autoriser « force push »
+  (Settings → Repository → Protected branches) **temporairement**, puis re-protéger. À faire **solo**
+  (le force-push écrase ; dangereux à plusieurs).
+- Alternative sans force-push : **ne pas** toucher au passé, juste **arrêter** le trailer à l'avenir.
+
+## 48. Rendre un dépôt public propre (badges, release auto, hygiène)
+
+**Date :** 2026-11-07
+
+Checklist (à implémenter) de ce qui rend un dépôt **propre, esthétique, efficace**.
+
+### 48.1 README + badges
+README : titre/tagline, **badges**, schéma (Mermaid/Excalidraw), quickstart, stack, structure.
+Badges (**shields.io**) : CI status, licence, dernière release, langages, couverture, style de code ;
+**sécurité** : OpenSSF **Scorecard**, OpenSSF **Best Practices**, SLSA, signé (cosign), SBOM.
+
+### 48.2 Fichiers d'hygiène
+`LICENSE`, `README`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, **`SECURITY.md`**, `CHANGELOG` (auto),
+`.gitignore`/`.dockerignore`, `.editorconfig`, `.gitattributes`, `CODEOWNERS`, `Makefile`.
+`.github/` : ISSUE_TEMPLATE, PULL_REQUEST_TEMPLATE, **dependabot.yml** (ou Renovate).
+
+### 48.3 Release automatique
+Fondation : **Conventional Commits** (+ commitlint). Outils :
+| Outil | Pour |
+|---|---|
+| **release-please** | language-agnostic, monorepo (PR de release + version + CHANGELOG) ← adapté backend/frontend |
+| **semantic-release** | 100% auto (écosystème Node) |
+| **git-cliff** | changelog depuis conventional commits |
+| **GoReleaser** | release conteneurs (Docker + cosign + SBOM) |
+
+### 48.4 Qualité & sécurité CI
+Linters (Ruff, ESLint, hadolint, actionlint), **pre-commit**, **Gitleaks**, **CodeQL**, Trivy/Grype,
+**Dependabot/Renovate**, **OpenSSF Scorecard action** (génère le badge).
+
+### 48.5 Découvrabilité (réglages GitHub)
+Description + website + **Topics**, **social preview image**, **branch protection** + required checks,
+**Releases** remplies, doc via **GitHub Pages / MkDocs**.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -4159,6 +4279,18 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Docker : métriques runtime / cgroups — https://docs.docker.com/engine/containers/runmetrics/
 - Kubernetes : drivers cgroup (cgroupfs vs systemd) — https://kubernetes.io/docs/setup/production-environment/container-runtimes/
 - Profil seccomp par défaut (containerd, source à jour) — https://github.com/containerd/containerd/blob/main/contrib/seccomp/seccomp_default.go
+- Build multi-plateforme (buildx) — https://docs.docker.com/build/building/multi-platform/
+- Conventional Commits — https://www.conventionalcommits.org/
+- release-please — https://github.com/googleapis/release-please
+- semantic-release — https://semantic-release.gitbook.io/semantic-release/
+- git-cliff (changelog) — https://git-cliff.org/
+- GoReleaser — https://goreleaser.com/
+- OpenSSF Scorecard — https://scorecard.dev/
+- OpenSSF Best Practices — https://www.bestpractices.dev/
+- pre-commit — https://pre-commit.com/
+- Renovate — https://docs.renovatebot.com/
+- Shields.io (badges) — https://shields.io/
+- `git filter-branch` — https://git-scm.com/docs/git-filter-branch
 - Builds multi-plateforme en CI (GitHub Actions) — https://docs.docker.com/build/ci/github-actions/multi-platform/
 - `docker buildx imagetools create` (fusion de manifests) — https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/
 - SLSA (niveaux de provenance) — https://slsa.dev/
