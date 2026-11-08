@@ -4207,6 +4207,56 @@ Description + website + **Topics**, **social preview image**, **branch protectio
 
 ---
 
+## 49. La chaîne de démarrage Linux (7 étapes) + noyau installé ≠ actif
+
+**Date :** 2026-11-08
+
+### 49.1 Les 7 étapes
+
+1. **Firmware (BIOS / UEFI)** : initialise le matériel, puis lance le chargeur. Avec **Secure Boot**
+   (UEFI), il **vérifie la signature** du chargeur/noyau avant de l'exécuter (chaîne de confiance au
+   boot — l'esprit de cosign, appliqué au démarrage).
+2. **Chargeur (GRUB2 / systemd-boot)** : menu + choix du noyau ; charge en RAM **vmlinuz** (noyau
+   compressé) **+ initramfs**.
+3. **Décompression + init du noyau** : vmlinuz se décompresse, détecte le matériel, prend le CPU. Ne
+   monte **pas encore** le vrai `/`.
+4. **initramfs** : mini-FS en RAM avec les **pilotes** (RAID, LVM, chiffrement) pour **atteindre et
+   préparer** la vraie racine. Sans lui, le noyau ne saurait pas lire un disque LVM/chiffré.
+5. **switch-root** : la vraie `/` accessible → le noyau quitte l'initramfs et **bascule** sur le FS
+   réel (cousin de `pivot_root`, sec. 43).
+6. **PID 1 = systemd** : premier process sur la vraie racine ; il gère tout le reste.
+7. **Services + cible par défaut** : systemd lit ses unités (`.service`/`.target`/`.socket`) et
+   démarre selon les dépendances. Cible par défaut : `multi-user.target` (serveur) vs
+   `graphical.target` (bureau).
+
+### 49.2 Noyau installé ≠ noyau qui tourne (cas vécu EC2)
+
+Trois sources, trois réponses possibles :
+```bash
+ls /boot/vmlinuz*                          # noyaux INSTALLÉS sur le disque
+readlink /boot/vmlinuz                      # le LIEN symbolique (souvent le + récent)
+uname -r                                    # le noyau qui TOURNE réellement
+grep -o 'BOOT_IMAGE=[^ ]*' /proc/cmdline    # le noyau que GRUB a BOOTÉ (autorité)
+```
+Cas vécu : lien → `1016`, `uname -r` → `1014` → noyau installé mais **pas actif**.
+
+**Piège :** `/boot/vmlinuz` (le lien) **ne décide pas** du boot — **l'autorité, c'est la config
+GRUB** (`/boot/grub/grub.cfg`). Même après reboot, GRUB peut rester par défaut sur l'ancien. Fix :
+```bash
+sudo update-grub   # régénère grub.cfg, met le + récent par défaut
+sudo reboot
+uname -r            # doit maintenant montrer le nouveau
+```
+
+### 49.3 L'insight conformité
+
+> Une **maj de sécurité du noyau n'a aucun effet tant que la machine n'a pas redémarré**.
+
+Les outils de conformité distinguent **« corrigé »** (paquet installé) de **« redémarré »** (noyau
+actif). Réflexe : après une maj noyau, **reboot + vérifier `uname -r`**.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -4291,6 +4341,9 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - Renovate — https://docs.renovatebot.com/
 - Shields.io (badges) — https://shields.io/
 - `git filter-branch` — https://git-scm.com/docs/git-filter-branch
+- systemd : séquence de démarrage (`bootup`) — https://www.freedesktop.org/software/systemd/man/latest/bootup.html
+- systemd : `systemctl` — https://www.freedesktop.org/software/systemd/man/latest/systemctl.html
+- systemd : `journalctl` — https://www.freedesktop.org/software/systemd/man/latest/journalctl.html
 - Builds multi-plateforme en CI (GitHub Actions) — https://docs.docker.com/build/ci/github-actions/multi-platform/
 - `docker buildx imagetools create` (fusion de manifests) — https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/
 - SLSA (niveaux de provenance) — https://slsa.dev/
