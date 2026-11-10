@@ -4257,6 +4257,684 @@ actif). Réflexe : après une maj noyau, **reboot + vérifier `uname -r`**.
 
 ---
 
+## 50. Chaîne de confiance : vérifier une ISO (GPG) ↔ vérifier une image (cosign)
+
+Télécharger un fichier ne dit rien sur sa fiabilité. Deux questions distinctes :
+
+- **Intégrité** : le fichier est-il arrivé **intact** (pas corrompu, pas tronqué) ?
+- **Authenticité** : vient-il **bien de l'éditeur annoncé** (pas d'un attaquant) ?
+
+### 50.1 Intégrité — la somme de contrôle
+
+Une empreinte (hash) prouve l'intégrité, pas l'origine. L'**algorithme doit être le même des deux côtés** :
+
+| Algorithme | Longueur de l'empreinte |
+|---|---|
+| SHA-256 | **64** caractères hexadécimaux |
+| SHA-512 | **128** caractères hexadécimaux |
+
+Piège classique : comparer un `sha256sum` local à un fichier `SHA512SUMS` officiel → **jamais identiques**, car algorithmes différents. Vérifier via le nom du fichier de sommes et la longueur.
+
+Comparaison automatique (évite l'erreur humaine sur 128 caractères) :
+
+```bash
+sha512sum -c SHA512SUMS 2>/dev/null   # attendu : <fichier>: OK
+```
+
+### 50.2 Authenticité — la signature GPG
+
+La somme seule est insuffisante : un attaquant qui remplace l'ISO peut **recalculer** le `SHA512SUMS`. Il faut une **signature cryptographique** que **seul l'éditeur** peut produire (clé privée) et que l'on vérifie (clé publique).
+
+```bash
+gpg --verify SHA512SUMS.sign SHA512SUMS          # échoue : No public key + ID de clé
+gpg --keyserver keyserver.ubuntu.com --recv-keys <ID_DE_CLE>
+gpg --verify SHA512SUMS.sign SHA512SUMS          # attendu : Good signature
+```
+
+`Good signature` + `WARNING: not certified` = signature **valide**, mais GPG n'a aucune preuve que la clé est la bonne. **Étape décisive** : comparer le fingerprint à une **source indépendante de confiance** (HTTPS officiel) :
+
+```bash
+gpg --fingerprint <ID_DE_CLE>   # comparer à la page officielle debian.org/CD/verify
+```
+
+### 50.3 La chaîne complète
+
+```
+Je fais confiance à → source HTTPS indépendante (debian.org/CD/verify)
+   qui publie        → le fingerprint de la clé éditeur
+   qui a signé       → SHA512SUMS.sign
+   qui garantit      → SHA512SUMS
+   qui contient      → l'empreinte de l'ISO
+```
+
+Chaque maillon vérifié ⇒ fichier **authentique ET intègre**.
+
+### 50.4 Le parallèle DevSecOps : c'est exactement cosign
+
+| ISO (GPG) | Image conteneur (cosign) |
+|---|---|
+| `sha512sum` = intégrité | digest `@sha256:…` = intégrité (immuable) |
+| `gpg --verify` = signature valide | `cosign verify` = signature valide |
+| fingerprint comparé à debian.org | `--certificate-identity` = **qui** a signé (workflow GitHub) |
+| clé privée Debian hors-ligne | signature **keyless** (OIDC, pas de clé à garder) |
+
+Même logique que `build-sign-publish.yml` : on **vérifie la signature par digest avant de promouvoir** une image vers `qa/staging/prod`. Signer prouve que ça **vient de notre pipeline** ; vérifier **qui** a signé casse l'attaque par substitution de clé. Voir [`../../devsecops-portfolio/.github/workflows/build-sign-publish.yml`].
+
+---
+
+## 51. systemd : piloter les services (cœur RHCSA/LFCS)
+
+**systemd = le PID 1 d'une vraie machine** : le premier programme lancé après le noyau, qui
+démarre, surveille et ordonne tous les services. Même rôle que le PID 1 d'un conteneur, mais en
+beaucoup plus complet (dépendances, surveillance, logs centralisés).
+
+### 51.1 Vocabulaire
+
+- **unit** : objet piloté par systemd. Type le plus courant = **`.service`** (un programme à faire tourner).
+- Exemples : `ssh.service`, `nginx.service`, `docker.service`.
+
+### 51.2 Les commandes `systemctl`
+
+```bash
+systemctl status ssh          # état du service
+sudo systemctl start ssh      # démarrer maintenant
+sudo systemctl stop ssh       # arrêter
+sudo systemctl restart ssh    # redémarrer
+sudo systemctl enable ssh     # démarrer AU BOOT
+sudo systemctl disable ssh    # ne plus démarrer au boot
+sudo systemctl enable --now nginx   # enable + start en une fois
+```
+
+**Distinction testée en certif :** `start` = **maintenant** (perdu au reboot) ≠ `enable` = **à chaque démarrage**. Un service peut être *enabled mais pas started*, ou l'inverse.
+
+États lus dans `status` : `active (running)` ✅ · `inactive (dead)` · `failed` ❌ · `enabled`/`disabled`.
+
+### 51.3 Logs : `journalctl`
+
+```bash
+journalctl -u ssh        # logs d'un service
+journalctl -u ssh -f     # suivre en direct (≈ docker logs -f)
+journalctl -b            # logs depuis le dernier démarrage
+journalctl -p err        # erreurs seulement
+```
+
+### 51.4 Diagnostic rapide
+
+```bash
+systemctl list-units --type=service --state=running   # ce qui tourne
+systemctl --failed                                    # services plantés
+journalctl -b -p err                                  # erreurs au boot
+```
+
+### 51.5 Targets (ex-runlevels) : mode de démarrage
+
+Un **target** = un **mode de démarrage** (regroupement d'units à atteindre). Remplace les anciens
+*runlevels*. Les deux principaux :
+
+| Target | Démarre… |
+|---|---|
+| `graphical.target` | **avec le bureau** (GUI) |
+| `multi-user.target` | **en mode texte**, sans interface (= un vrai serveur) ⭐ |
+
+```bash
+systemctl get-default                       # target par défaut au boot
+sudo systemctl set-default multi-user.target  # passer en mode texte (puis reboot)
+sudo systemctl set-default graphical.target   # revenir au bureau
+systemctl list-units --type=target          # targets actifs
+sudo systemctl isolate multi-user.target    # basculer MAINTENANT sans reboot
+```
+
+**Cas vécu :** l'install unattended de VirtualBox installe GNOME par défaut. Pour obtenir un serveur
+sans interface, **pas besoin de réinstaller** : `set-default multi-user.target` + reboot. Le bureau
+reste installé mais ne se lance plus (réversible). Un serveur DevOps est **toujours** en
+`multi-user.target`.
+
+## 52. Utilisateurs, groupes et permissions
+
+### 52.1 Lire son identité : `id`
+
+```
+uid=1000(user) gid=1000(user) groups=...,27(sudo),4(adm),989(docker),...
+```
+
+- **uid** : identifiant utilisateur. Convention : **< 1000 = comptes système**, **≥ 1000 = humains** (1000 = 1er humain créé).
+- **gid** : groupe principal.
+- **groups** : groupes secondaires = **les permissions**.
+
+### 52.2 Groupes qui donnent des pouvoirs
+
+| Groupe | Autorise |
+|---|---|
+| `sudo` | exécuter des commandes en root via `sudo` |
+| `adm` | lire les logs (`/var/log`) sans être root |
+| `docker` | piloter Docker sans sudo — **⚠️ équivalent root** |
+| `kvm` / `libvirt` | lancer des VM |
+
+> **⚠️ Insight sécurité :** appartenir au groupe **`docker`** équivaut à un **accès root**. Exemple : `docker run -v /:/host -it alpine chroot /host` monte tout le disque hôte → root de la machine, **sans sudo**. À n'accorder qu'en connaissance de cause. Même logique que les capabilities vues côté conteneurs.
+
+### 52.3 Gérer les utilisateurs
+
+```bash
+sudo useradd -m alice          # créer (-m = créer son /home)
+sudo passwd alice              # définir son mot de passe
+sudo usermod -aG sudo alice    # AJOUTER au groupe sudo
+groups alice                   # voir ses groupes
+```
+
+**Piège testé en certif :** `usermod -aG` = **a**ppend (ajoute sans écraser). `usermod -G` **sans `-a`** **écrase** tous les groupes existants. Toujours **`-aG`**.
+
+### 52.4 root verrouillé (bonne pratique Debian/Ubuntu)
+
+Plutôt qu'un root avec mot de passe (1ʳᵉ cible des attaques SSH par force brute), on **verrouille root** et on passe par `sudo` (traçable). Vérifier / verrouiller :
+
+```bash
+sudo passwd -S root    # root L = Locked (bien) · root P = Password (actif)
+sudo passwd -l root    # -l = lock
+```
+
+### 52.5 Inspecter un processus (3 vues complémentaires)
+
+```bash
+pgrep -l sshd          # chercher un processus par nom (vide = aucun ; echo $? → 1)
+ps aux | grep sshd     # vue détaillée (user, CPU, mémoire)
+systemctl status ssh   # l'état du SERVICE (vue systemd)
+```
+
+systemctl = le **service** ; pgrep/ps = le **processus** réel. Philosophie Unix : **pas de sortie = rien trouvé / succès silencieux** (confirmer avec `$?`).
+
+> Note : **WSL ne lance pas systemd** par défaut → les services (ssh, cron) n'y tournent pas automatiquement. La pratique systemd se fait sur une **vraie VM** (Debian/Ubuntu).
+
+---
+
+## 53. Pare-feu : ufw (Debian/Ubuntu)
+
+Un **pare-feu** filtre le trafic réseau entrant : « **tout bloqué par défaut, on ouvre au cas par cas** »
+(*default deny* / *least privilege*). Même rôle que les **Security Groups AWS**, mais à l'intérieur de
+la machine.
+
+**`ufw`** (*Uncomplicated Firewall*) = surcouche simple au-dessus de `iptables`/`nftables`. Famille
+**Debian/Ubuntu**. Équivalent Red Hat/Rocky/Alma = **`firewalld`** (`firewall-cmd`).
+
+### 53.1 Activer
+
+```bash
+sudo ufw allow OpenSSH    # ouvre le port 22 (profil prédéfini = 22/tcp)
+sudo ufw enable           # active le pare-feu (maintenant + à chaque boot)
+```
+
+### 53.2 ⚠️ L'ORDRE EST VITAL
+
+**Toujours `allow OpenSSH` AVANT `enable`.** Sur une machine **distante** (EC2, serveur loué), on est
+connecté **par SSH** : activer le pare-feu avant d'autoriser SSH **coupe sa propre connexion** →
+**verrouillage hors du serveur, sans retour**. L'erreur qui enferme le plus d'admins dehors.
+
+### 53.3 Usage courant
+
+```bash
+sudo ufw status verbose        # voir les règles actives
+sudo ufw allow 80/tcp          # HTTP
+sudo ufw allow 443/tcp         # HTTPS
+sudo ufw delete allow 80/tcp   # retirer une règle
+```
+
+Moins de ports ouverts = moins de **surface d'attaque**. Même philosophie *default deny* que root
+verrouillé, `main`/`universe`, et la vérif de signature cosign : **n'accorder que le strict nécessaire**.
+
+### 53.4 Lire `ufw status verbose` (pratique)
+
+```
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), disabled (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+22/tcp (OpenSSH)           ALLOW IN    Anywhere
+22/tcp (OpenSSH (v6))      ALLOW IN    Anywhere (v6)
+```
+
+| Ligne | Sens |
+|---|---|
+| `Status: active` | pare-feu en marche |
+| `Logging: on (low)` | connexions **bloquées journalisées** (qui tente d'entrer) |
+| `Default: deny (incoming)` | 🔑 **tout bloqué en entrée** par défaut ; seules les règles listées ouvrent |
+| `allow (outgoing)` | la machine sort librement (apt, web) |
+| `New profiles: skip` | un paquet installé **n'ouvre pas** de port tout seul |
+| `22/tcp (OpenSSH)` ×2 | seule exception : SSH, en **IPv4 et IPv6** |
+
+`ufw enable` active **et** persiste au boot en une fois (pas le piège start/enable de systemd).
+`Rules updated` + `Rules updated (v6)` = règle posée pour IPv4 puis IPv6.
+
+### 53.5 Install par défaut : Debian vs Ubuntu
+
+**Aucun** des deux n'a de pare-feu **actif** par défaut → SSH marche sans toucher ufw. ufw est une
+**étape de durcissement** à appliquer **aux deux**. Seule différence : **Ubuntu livre `ufw` préinstallé**
+(inactif) ; sur **Debian minimal** il faut d'abord `sudo apt install ufw`. Côté Red Hat (Rocky/RHEL),
+l'équivalent `firewalld` est souvent **actif par défaut**.
+
+---
+
+## 54. Accéder en SSH à une VM VirtualBox (NAT) + piège WSL
+
+### 54.1 Le problème : NAT = VM injoignable depuis l'hôte
+
+En mode réseau **NAT**, la VM reçoit une IP privée (ex. `10.0.2.15`) dans un réseau interne à
+VirtualBox. Trafic **VM → Internet** : OK. Trafic **hôte → VM** : **bloqué** → `ssh 10.0.2.15` donne
+`No route to host`.
+
+> Parallèle AWS : équivaut à une instance EC2 **sans IP publique** — elle sort, mais n'est pas joignable de l'extérieur.
+
+### 54.2 La solution : redirection de port (port forwarding)
+
+Configuration → Réseau → Interface 1 (NAT) → Avancé → **Redirection de ports** :
+
+| Champ | Valeur | Obligatoire |
+|---|---|---|
+| Protocole | TCP | oui |
+| IP hôte | `127.0.0.1` (toi seul y accèdes ; vide = tout le réseau) | non |
+| Port hôte | `2222` | oui |
+| IP invité | *(vide → VirtualBox trouve l'IP de la VM seul, robuste si elle change)* | non |
+| Port invité | `22` | oui |
+
+Connexion : `ssh -p 2222 debian@127.0.0.1`. VirtualBox relaie `127.0.0.1:2222` (sur l'hôte) vers
+`VM:22`. On ne vise jamais `10.0.2.15` directement (injoignable).
+
+### 54.3 ⚠️ Piège WSL : son 127.0.0.1 ≠ celui de Windows
+
+WSL2 a son **propre réseau isolé**. Depuis WSL, `127.0.0.1` = le loopback **de WSL**, pas celui de
+Windows où VirtualBox écoute → `Connection refused`. **Lancer le SSH depuis PowerShell (Windows)**,
+pas depuis WSL. (Contournement WSL : viser la passerelle `ip route | grep default | awk '{print $3}'`
+au lieu de `127.0.0.1`, mais PowerShell est plus simple.)
+
+### 54.4 Lire les messages d'erreur (diagnostic)
+
+| Message | Sens |
+|---|---|
+| `No route to host` | pas de chemin réseau (NAT sans redirection) |
+| `Connection refused` | chemin OK mais **rien n'écoute** sur le port (sshd arrêté, ou mauvais loopback WSL) |
+| `Permission denied` | on a **atteint** sshd, mais **auth** échouée (mot de passe/clé) |
+
+Côté VM, garder SSH actif au reboot : `sudo systemctl enable --now ssh` (piège start vs enable, §51.2).
+Mot de passe sans caractère spécial (`@`, `/`…) pour éviter les décalages de clavier VM ↔ hôte.
+
+---
+
+## 55. Niveaux CPU x86-64 (v1→v4) & kernel panic en VM
+
+### 55.1 Les niveaux de microarchitecture
+
+Les CPU 64 bits ont des **paliers** de jeux d'instructions. Un OS peut exiger un palier minimum.
+
+| Niveau | Époque | Instructions clés | Exige |
+|---|---|---|---|
+| v1 | 2003 | base 64 bits | — |
+| v2 | ~2009 | SSE4.2 | Debian/Ubuntu, **Rocky/RHEL 9** |
+| **v3** | ~2015 | **AVX2** | **Rocky/RHEL 10** ⭐ |
+| v4 | ~2017 | AVX-512 | — |
+
+### 55.2 Le piège VirtualBox
+
+VirtualBox **n'a pas de CPU** : il relaie celui de l'hôte. Mais par défaut il présente un CPU
+**générique bridé (~v2)**, même si l'hôte est plus récent — **pour la portabilité** (la VM doit pouvoir
+tourner sur une machine plus ancienne). Conséquence : **Rocky/RHEL 10** (qui exige v3) plante avec
+`Fatal glibc error: CPU does not support x86-64-v3`, alors que Debian/Ubuntu/Rocky 9 (v2) passent sans rien faire.
+
+### 55.3 Correctif : exposer le vrai CPU
+
+VM **éteinte**, dans PowerShell :
+
+```powershell
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm "<nom_vm>" --cpu-profile host
+```
+
+`--cpu-profile host` lève le bridage → la VM voit l'AVX2/v3 réel. Contrepartie : la VM devient liée à un
+CPU moderne (sans importance pour un lab local). Pour Rocky 10 en VM : penser aussi **4 Go de RAM** (l'installateur
+Anaconda plante en OOM avec 2 Go) et **chipset ICH9 + EFI**.
+
+Syntaxe officielle (VM **arrêtée** uniquement) : `VBoxManage modifyvm <vmname> [--cpu-profile=host | ...]`.
+Vérifier / lister :
+
+```powershell
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" showvminfo "<nom_vm>" | Select-String "CPU"
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" list cpu-profiles
+```
+
+Source : manuel VirtualBox, section *VBoxManage modifyvm* —
+https://www.virtualbox.org/manual/topics/vboxmanage.html#vboxmanage-modifyvm
+
+### 55.4 Kernel panic = PID 1 est mort
+
+`Kernel panic - not syncing: Attempted to kill init!` = l'équivalent du BSOD Windows : le noyau s'arrête
+car **PID 1 (init/systemd) est mort**. Rappel : **PID 1 ne doit jamais mourir** (même criticité que le
+PID 1 d'un conteneur). Causes typiques en VM : RAM insuffisante, exigence CPU non satisfaite.
+
+---
+
+## 56. Partitionnement, systèmes de fichiers & LVM
+
+### 56.1 Les 4 décisions d'une install serveur
+
+1. **Distribution** (Debian/Ubuntu vs Red Hat/Rocky/Alma)
+2. **Support d'installation** : ISO branchée en VM, ou **clé USB amorçable** (Rufus/Etcher/`dd`) pour une machine physique
+3. **Découpage du disque** (partitions classiques vs **LVM**)
+4. **Reproduire l'install** : preseed (Debian), autoinstall (Ubuntu), **Kickstart** (Red Hat), **cloud-init** (cloud/EC2) — le cœur DevOps, pont vers Ansible/Terraform
+
+> En VM, l'ISO se branche directement (lecteur optique virtuel) → pas de clé USB. La clé USB amorçable
+> sert à démarrer une **machine physique** vide. Côté cloud, jamais nécessaire (image + cloud-init).
+
+### 56.2 Les partitions de base (install EFI)
+
+| Partition | Rôle |
+|---|---|
+| **ESP** | démarrage UEFI (contient GRUB), montée sur `/boot/efi` — n'existe qu'en mode EFI |
+| **ext4** (`/`) | système de fichiers Linux (OS + données). Debian/Ubuntu = ext4 ; Red Hat = souvent **XFS** |
+| **swap** | rallonge de RAM sur disque (quand la RAM est pleine) |
+
+### 56.3 LVM (Logical Volume Manager)
+
+Couche d'abstraction qui rend le stockage **élastique**. Trois étages :
+
+```
+Disques physiques ──> PV (Physical Volume) ──> VG (Volume Group, le "pool") ──> LV (Logical Volume)
+                                                                                   └─> formaté ext4/xfs, monté sur /, /var...
+```
+
+| Terme | C'est quoi |
+|---|---|
+| **PV** | un disque/partition donné à LVM |
+| **VG** | tous les PV réunis en un réservoir |
+| **LV** | "partition" élastique taillée dans le VG |
+
+**Superpouvoir : redimensionner à chaud** (sans reboot, sans repartitionner) :
+
+```bash
+lvextend -L +5G /dev/vg0/var    # agrandir le volume
+resize2fs /dev/vg0/var          # étendre le système de fichiers (ext4 ; xfs_growfs pour XFS)
+```
+
+Aussi : **ajouter un disque** au VG pour agrandir le pool, **snapshots** pour sauvegarder avant une
+opération risquée. Partitionnement classique = tailles **figées** → `/var` plein = repartitionner (risqué).
+LVM = quasi universel en prod, **testé en RHCSA/LFCS**. À l'install : option « Assisté - tout le disque avec LVM ».
+
+---
+
+## 57. RHEL et ses rebuilds (AlmaLinux, Rocky) : compatibilité
+
+### 57.1 Le modèle
+
+**RHEL** (Red Hat Enterprise Linux) = distribution **payante** de référence en entreprise (support +
+stabilité 10 ans). Mais Linux est **open source** → Red Hat publie son code. Des **rebuilds** gratuits le
+**recompilent** : **AlmaLinux** et **Rocky Linux** = « RHEL, mais gratuit et communautaire ».
+
+### 57.2 Pourquoi la compatibilité est TOUT l'intérêt
+
+Les entreprises font tourner des logiciels **certifiés RHEL** (Oracle, SAP, bancaire). Un clone n'a de
+valeur que s'il garantit que ces logiciels tournent **à l'identique**. D'où deux niveaux de promesse :
+
+| Promesse | Signifie |
+|---|---|
+| **Binairement compatible** | un programme compilé pour RHEL s'exécute **tel quel** (même ABI), sans recompilation |
+| **Bug pour bug** | reproduit RHEL **à l'identique, bugs compris** (fidélité maximale) |
+
+### 57.3 Le tournant 2023 et les deux stratégies
+
+En **2023, Red Hat a restreint l'accès au code source** (réservé aux clients) pour freiner les clones.
+Réactions divergentes :
+
+| Rebuild | Stratégie | Terme |
+|---|---|---|
+| **Rocky Linux** | rester une **copie carbone** de RHEL | **bug pour bug** |
+| **AlmaLinux** | compatibilité **applicative**, s'autorise à corriger des bugs avant RHEL | **binairement compatible** |
+
+Le vocabulaire reflète donc un **choix stratégique**, pas un détail technique.
+
+### 57.4 Pourquoi ça compte en DevSecOps
+
+- Proposer du **RHEL gratuit** (Alma/Rocky) quand le support officiel n'est pas requis.
+- Comprendre les **images de base** de conteneurs (`rockylinux:9`, `almalinux:10`…).
+- La compatibilité = **réduction de risque** : les applis certifiées RHEL tournent sans surprise.
+- Les deux ISO existent aussi en variante **`x86_64_v2`** (CPU plus anciens) tout en restant la v10 — voir §55.
+
+---
+
+## 58. Installer un OS : VM (ISO) vs clé USB bootable (bare-metal)
+
+### 58.1 Les 4 étapes d'une install bare-metal
+
+1. **ISO** téléchargée + **vérifiée** (SHA-512 + GPG, cf. §50)
+2. **Écrire l'ISO sur une clé USB** (la rendre bootable)
+3. **Booter la machine cible** sur la clé (menu de boot du firmware)
+4. **Installer** (identique à une VM : clavier, partitionnement/LVM, tasksel, GRUB)
+
+### 58.2 Graver la clé USB
+
+| Outil | OS | Sûreté |
+|---|---|---|
+| **Rufus** (rufus.ie) | Windows | ✅ ne liste que les clés **amovibles** → ne peut pas toucher le disque système |
+| `dd if=x.iso of=/dev/sdX bs=4M` | Linux | ⚠️ **dangereux** : mauvais `/dev/sdX` = disque système écrasé, **sans confirmation**. Vérifier avec `lsblk` d'abord |
+
+La gravure **efface toute la clé** (≥ 4 Go). En UEFI : Rufus gère le mode, parfois désactiver **Secure Boot**.
+
+### 58.3 Booter sur la clé
+
+Au démarrage, touche du **menu de boot** (souvent **F12/F11/Échap/F2/Suppr**, affichée brièvement) →
+choisir la clé USB. Équivalent physique de l'**ordre d'amorçage** réglé dans VirtualBox.
+
+### 58.4 VM vs bare-metal
+
+| Étape | VirtualBox | Bare-metal (USB) |
+|---|---|---|
+| Support | ISO branchée (virtuel) | clé USB gravée |
+| Boot | ordre d'amorçage VirtualBox | menu de boot du BIOS/UEFI |
+| Disque cible | `.vdi` **isolé** (zéro risque) | **vrai disque** ⚠️ |
+| Install | identique | identique |
+
+> **⚠️ Danger n°1 (bare-metal) :** à l'étape partitionnement, choisir le **mauvais disque** efface l'OS
+> existant (Windows inclus). Risque **inexistant** en VM. N'installer en bare-metal que sur une machine
+> **dédiée/sacrifiable**, jamais sur son poste principal.
+
+### 58.5 Rappel isolation WSL
+
+WSL est isolé de Windows **sauf** sous **`/mnt/c/...`** = le vrai disque Windows monté. Un `rm` sur
+`/mnt/c/` supprime de vrais fichiers Windows. Les commandes sur le système WSL propre (`/home`, `/`)
+n'ont aucun impact sur Windows.
+
+---
+
+## 59. Vagrant : des VM reproductibles en code
+
+### 59.1 Le rôle
+
+**Vagrant automatise la création de VM reproductibles.** Au lieu de cliquer dans VirtualBox (ISO,
+installateur, réseau, SSH), on décrit la VM dans un **`Vagrantfile`** et `vagrant up` la fournit prête.
+C'est de l'**Infrastructure as Code** pour le poste de dev (pendant cloud = Terraform). Vagrant pilote
+VirtualBox (le « provider »).
+
+### 59.2 La « box »
+
+Une **box** = une VM **déjà installée** (image toute faite, téléchargée depuis Vagrant Cloud). Plus
+besoin d'ISO ni d'installateur : `debian/trixie64` est déjà un Debian prêt, cloné instantanément.
+
+### 59.3 Le Vagrantfile
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.box = "debian/trixie64"
+  config.vm.hostname = "web-server"
+  config.vm.network "private_network", ip: "192.168.56.10"
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 2048
+    vb.cpus = 2
+  end
+  config.vm.provision "shell", inline: "apt update && apt install -y nginx"
+end
+```
+
+### 59.4 Les commandes
+
+```bash
+vagrant up        # créer + démarrer
+vagrant ssh       # se connecter (SSH auto-configuré, pas de port forwarding manuel)
+vagrant halt      # éteindre
+vagrant destroy   # supprimer (repartir propre)
+```
+
+### 59.5 Intérêt DevOps & nuance
+
+- **IaC** : environnement décrit dans un fichier versionnable (Git).
+- **Reproductibilité** : `vagrant up` donne la même VM pour tout le monde.
+- **Multi-VM** : un Vagrantfile peut lancer plusieurs VM → idéal pour pratiquer **Ansible** (1 contrôleur + N cibles).
+- **Jetable** : `destroy` + `up` en secondes → expérimenter sans peur.
+
+> Nuance : Vagrant **cache** l'install (pas d'ISO/partitionnement). Pour **apprendre** l'install, la faire
+> à la main une fois est formateur ; Vagrant évite ensuite de la refaire 50 fois. Ordre : manuel d'abord, Vagrant ensuite.
+
+---
+
+## 60. Les 3 couches de l'automatisation (carte mentale)
+
+Chaque outil agit à un **moment différent** du cycle de vie d'une machine.
+
+```
+1. CRÉER la machine        → Terraform (cloud)  / Vagrant (local)
+2. INSTALLER l'OS          → preseed / Kickstart / autoinstall   (ou box pré-installée + cloud-init au 1er boot)
+3. CONFIGURER l'intérieur  → Ansible
+```
+
+| Couche | Question | Outils |
+|---|---|---|
+| **1. Infra** | « crée-moi une **machine** » | **Terraform** (cloud/prod), **Vagrant** (VM locale de dev) |
+| **2. Install OS** | « installe l'**OS** dessus » | **preseed** (Debian), **Kickstart** (Red Hat), **autoinstall** (Ubuntu), **cloud-init** (1er boot) |
+| **3. Config** | « configure ce qu'il y a **dedans** » | **Ansible** (paquets, users, services, fichiers) |
+
+**Analogie maison** : Terraform/Vagrant **construisent la maison** ; preseed/Kickstart/cloud-init = la
+**livraison standard** (OS de base) ; Ansible **meuble et aménage** (nginx, users, firewall…).
+
+### Distinctions à retenir
+
+- **Vagrant vs preseed/Kickstart** : Vagrant **saute l'install** (utilise une **box** déjà installée) ;
+  preseed/Kickstart **automatisent l'install elle-même** (répondre à l'installateur). cloud-init
+  **configure au 1er boot** (ce qui configure un EC2).
+- **Vagrant vs Terraform** : même idée (infra as code), échelle différente — Vagrant = **labo local**,
+  Terraform = **vraie infra cloud** (réseaux, bases, N VM).
+- **Vagrant vs Ansible** : **complémentaires**. Vagrant **crée** la VM, Ansible **configure l'intérieur**
+  (Ansible ne crée pas de VM). Vagrant peut **appeler Ansible** comme provisioner.
+
+### Affiner la carte : cloud-init vs Ansible, et la couche 2 sautée
+
+**cloud-init vs Ansible** (même couche 3 = configurer, mais cousins, pas jumeaux) :
+
+| | cloud-init | Ansible |
+|---|---|---|
+| Quand | **une fois**, au 1er boot | quand on veut, répété |
+| D'où | de **l'intérieur** de la machine | de **l'extérieur** (push SSH) |
+| Puissance | basique (bootstrap) | complet (rôles, boucles, N machines) |
+
+→ souvent combinés : cloud-init amorce (Python + clé SSH) puis **passe le relais à Ansible**.
+
+**La couche 2 (install OS) est souvent SAUTÉE** : Vagrant (box) et Terraform (AMI/image cloud) partent
+d'**images déjà installées** → l'OS est déjà sur le disque, pas besoin d'autoinstall/preseed/Kickstart.
+Ces derniers servent quand il n'y a **pas d'image toute faite** : **bare-metal / disque vide**.
+
+### La carte complète
+
+| Couche | Rôle | Outils | Analogie maison |
+|---|---|---|---|
+| **1** | créer la machine (CPU/RAM/disque) | Terraform, Vagrant | le terrain + la coquille |
+| **2** | installer l'OS (souvent sautée si image prête) | autoinstall, preseed, Kickstart | construire la maison |
+| **3** | configurer | cloud-init (express 1x), Ansible (complet, continu) | emménager |
+
+> Une « machine » créée en couche 1 inclut toujours un **disque** (stockage). Avec Vagrant/Terraform, ce
+> disque vient **déjà rempli** d'un OS (box/image) → couche 2 sautée. Un disque **vide** exige la couche 2.
+
+---
+
+## 61. autoinstall / preseed / Kickstart / cloud-init (install non interactive)
+
+Automatiser l'**installation de l'OS** = fournir à l'installateur un fichier de réponses, lu au démarrage.
+Un par famille d'installateur (cf. §56.1, §60) :
+
+| Fichier | Installateur | Distribution | Format |
+|---|---|---|---|
+| **autoinstall** (`user-data`) | Subiquity | Ubuntu | YAML (cloud-init) |
+| **preseed** | debian-installer | Debian | clés `d-i ...` |
+| **Kickstart** (`ks.cfg`) | Anaconda | RHEL/Rocky/Alma | directives Kickstart |
+| **cloud-init** | — | tous / cloud | YAML, au **1er boot** (configure un EC2) |
+
+### 61.1 Exemple autoinstall (Ubuntu)
+
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: srv01
+    username: ubuntu
+    password: "$6$..."     # hash via: openssl passwd -6
+  ssh:
+    install-server: true
+    allow-pw: false
+```
+
+- **1ère ligne `#cloud-config` obligatoire**.
+- Mot de passe **jamais en clair** → **hash** `$6$...` (SHA-512) généré par `openssl passwd -6`.
+- `allow-pw: false` = SSH par **clé** uniquement (durcissement).
+
+### 61.2 Où le placer / le lancer
+
+- Fichiers **`user-data`** + **`meta-data`** (ce dernier peut être vide).
+- Méthode **NoCloud** : les mettre sur un support étiqueté **`cidata`** (petite ISO/USB), attaché comme
+  2e lecteur ; Subiquity le détecte. Parfois ajouter `autoinstall` aux paramètres noyau au menu GRUB.
+- Méthode **HTTP** : `python3 -m http.server`, puis au boot `autoinstall ds=nocloud-net;s=http://<ip>:8000/`.
+
+> Puissant mais **fiddly**. Pour s'entraîner vite sur des VM, **Vagrant** (box pré-installée) donne le même
+> résultat en `vagrant up`. autoinstall/preseed/Kickstart = la vraie compétence pour le **bare-metal/cloud** en entreprise.
+
+### 61.3 Noms de fichiers par famille
+
+| Famille | Fichier(s) | Extension | Nom imposé ? | Fourni via |
+|---|---|---|---|---|
+| **Ubuntu** (autoinstall) | **`user-data`** + **`meta-data`** | **aucune** | ✅ **strict** (détecté par le support `cidata`) | image/USB `cidata` ou HTTP |
+| **Debian** (preseed) | **`preseed.cfg`** | `.cfg` | ❌ libre | boot `preseed/url=http://.../preseed.cfg` |
+| **RHEL/Alma** (Kickstart) | **`ks.cfg`** | `.cfg` | ❌ libre | boot `inst.ks=http://.../ks.cfg` |
+
+Validateurs : `cloud-init schema --config-file user-data` (Ubuntu/cloud-init), `ksvalidator -v RHEL10 ks.cfg` (pykickstart).
+
+### 61.4 Deux installateurs ISO = deux ISO distinctes
+
+Une install automatisée depuis ISO utilise **2 ISO séparées** :
+
+| ISO | Origine | Rôle |
+|---|---|---|
+| ISO de la distrib (Ubuntu…) | **téléchargée** (~2-3 Go) | **quoi** installer (l'installateur) |
+| ISO `cidata` | **fabriquée** (user-data + meta-data) (~Ko) | **comment** (les réponses) |
+
+Les deux sont attachées à la VM (2 lecteurs optiques). L'install se fait **dans une NOUVELLE VM** (pas sur
+l'hôte ni dans WSL) : WSL/Windows ne sert qu'à **écrire et valider** le fichier (atelier). Créer/valider un
+fichier **n'installe rien** (recette en attente) — contrairement à `vagrant up` qui **agit**.
+
+### 61.5 Install (Job 1) vs cloud-init (Job 2) — et la réutilisabilité
+
+Deux jobs distincts, souvent confondus :
+
+| Job | Quand | Même pour les 3 familles ? |
+|---|---|---|
+| **Job 1 — installer l'OS** (autoinstall/preseed/Kickstart) | pendant l'install | ❌ **3 formats incompatibles** |
+| **Job 2 — configurer** (cloud-init : users, paquets, SSH, fuseau) | au **1er boot** | ✅ **universel** |
+
+**Scénarios :**
+- **Install ISO** (VM/bare-metal) : Job 1 obligatoire ; cloud-init (Job 2) optionnel.
+- **Image cloud** (EC2) : **pas d'install** → **cloud-init SEUL** (collé dans « user data » de la console).
+
+**Imbriqué vs séparé (principe DRY) :** Ubuntu autorise à **imbriquer** le cloud-init dans l'autoinstall
+(sous-clé `autoinstall.user-data:`) → pratique pour une install Ubuntu **jetable**, mais **non réutilisable**
+(Debian/RHEL/cloud ne lisent pas `autoinstall:`). Pour **réutiliser** la config partout, garder le
+**cloud-init dans un fichier séparé et autonome** (`#cloud-config`), appliqué sur n'importe quelle famille
+ou instance cloud. Job 1 = spécifique par famille ; Job 2 = **un seul fichier commun** réutilisable.
+
+---
+
 <!-- Ajouter les nouvelles entrées au-dessus de cette ligne, en suivant le même format. -->
 
 ## Ressources
@@ -4271,6 +4949,52 @@ Documentations officielles, plus le guide de Stéphane Robert (signalé à part)
 - asdf-vm — https://blog.stephane-robert.info/docs/outils/systeme/asdf-vm/
 - jq : traiter du JSON en ligne de commande — https://blog.stephane-robert.info/docs/admin-serveurs/linux/references/jq/
 - crane — https://blog.stephane-robert.info/docs/conteneurs/outils/crane/
+
+### Install non interactive (autoinstall / preseed / Kickstart / cloud-init)
+- Ubuntu autoinstall — référence — https://canonical-subiquity.readthedocs-hosted.com/en/latest/reference/autoinstall-reference.html
+- Debian preseed — guide officiel — https://www.debian.org/releases/stable/amd64/apb.en.html
+- Kickstart (RHEL) — documentation Red Hat — https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/automatically_installing_rhel/index
+- cloud-init — documentation — https://cloudinit.readthedocs.io/
+
+### Vagrant
+- Vagrant — documentation officielle — https://developer.hashicorp.com/vagrant/docs
+- Vagrant — introduction / premiers pas — https://developer.hashicorp.com/vagrant/tutorials/getting-started
+- Vagrant Cloud (catalogue de boxes) — https://portal.cloud.hashicorp.com/vagrant/discover
+
+### Clé USB bootable
+- Rufus (graveur d'ISO, Windows) — https://rufus.ie/
+- Debian — préparer une clé USB d'installation — https://www.debian.org/releases/stable/amd64/ch04s03.en.html
+
+### RHEL & rebuilds (AlmaLinux, Rocky)
+- AlmaLinux — site officiel — https://almalinux.org/
+- Rocky Linux — site officiel — https://rockylinux.org/
+- Red Hat — à propos de RHEL — https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux
+
+### Partitionnement & LVM
+- LVM — documentation Red Hat (gestion du stockage) — https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/configuring_and_managing_logical_volumes/index
+- Debian — partitionnement de l'installateur — https://www.debian.org/releases/stable/amd64/apcs04.en.html
+- Ubuntu — autoinstall (installation automatisée) — https://canonical-subiquity.readthedocs-hosted.com/en/latest/reference/autoinstall-reference.html
+- cloud-init — documentation officielle — https://cloudinit.readthedocs.io/
+
+### Pare-feu (ufw / firewalld)
+- ufw (manuel Ubuntu) — https://manpages.ubuntu.com/manpages/noble/en/man8/ufw.8.html
+- UFW — doc communautaire Ubuntu — https://help.ubuntu.com/community/UFW
+- firewalld (équivalent Red Hat) — https://firewalld.org/documentation/
+
+### systemd, utilisateurs & permissions
+- systemctl (manuel) — https://www.freedesktop.org/software/systemd/man/latest/systemctl.html
+- journalctl (manuel) — https://www.freedesktop.org/software/systemd/man/latest/journalctl.html
+- systemd.service (unités de service) — https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
+- useradd (manuel) — https://man7.org/linux/man-pages/man8/useradd.8.html
+- usermod (manuel) — https://man7.org/linux/man-pages/man8/usermod.8.html
+- Docker : le groupe docker = accès root (post-install) — https://docs.docker.com/engine/install/linux-postinstall/
+- Activer systemd dans WSL — https://learn.microsoft.com/windows/wsl/systemd
+
+### Chaîne de confiance : vérification ISO (GPG) & signature d'images
+- Vérifier les CD/ISO Debian (sommes + GPG) — https://www.debian.org/CD/verify
+- GnuPG — vérifier une signature — https://www.gnupg.org/gph/en/manual/x135.html
+- cosign — vérifier une signature — https://docs.sigstore.dev/cosign/verifying/verify/
+- Sigstore — signature keyless (OIDC) — https://docs.sigstore.dev/cosign/signing/overview/
 
 ### Docker & WSL2
 - Installer Docker Engine sur Ubuntu — https://docs.docker.com/engine/install/ubuntu/
